@@ -1,50 +1,82 @@
-import time
 import os
+import time
 import oracledb
-from dotenv import load_dotenv
+import praw
 
-BATCH_SIZE = 500
-RETRY_DELAY = 10
+RETRY_DELAY = 10  # 
 
 def get_oracle_connection():
     """Get a new Oracle DB connection from environment variables."""
     try:
-        load_dotenv()
         cs = os.getenv("db-dsn")
         connection = oracledb.connect(
             user=os.getenv("db-username"),
             password=os.getenv("db-password"),
             dsn=cs
         )
-        print("Connection successful!")
+        print("Oracle connection successful!")
         return connection
     except oracledb.DatabaseError as e:
         print(f"Error connecting to Oracle DB: {e}")
         return None
 
-def get_subreddit_posts_and_comments(reddit, subreddit_name, last_fetched_utc, limit=None, comments_max=50):
-    """Fetch posts and comments from a subreddit that are newer than last_fetched_utc."""
-    subreddit = reddit.subreddit(subreddit_name)
-    posts_data = []
-    comments_data = []
+def safe_execute(conn, cursor, sql, params):
+    """Execute a SQL statement safely with automatic reconnects."""
+    while True:
+        try:
+            cursor.execute(sql, params)
+            conn.commit()
+            break
+        except oracledb.DatabaseError as e:
+            error_obj, = e.args
+            print(f"DB error: {error_obj.message}")
+            print(f"Retrying in {RETRY_DELAY}s...")
+            time.sleep(RETRY_DELAY)
+            new_conn = get_oracle_connection()
+            if new_conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+                conn = new_conn
+                cursor = conn.cursor()
+            else:
+                print("Reconnect failed, retrying again...")
+    return conn, cursor
 
-    for post in subreddit.hot(limit=limit):
+def fetch_and_insert_posts_comments(reddit, subreddit_name, last_fetched_utc, conn, cursor, comments_max=50):
+    """Fetch posts and comments and insert them immediately into the DB."""
+    subreddit = reddit.subreddit(subreddit_name)
+    max_utc = last_fetched_utc
+
+    for post in subreddit.hot(limit=None):
         if post.created_utc <= last_fetched_utc:
             continue
 
-        post_info = {
+        post_params = {
             "author": str(post.author) if post.author else None,
             "title": post.title,
             "created_utc": post.created_utc,
             "id": post.id,
-            "is_original_content": post.is_original_content,
+            "is_original_content": 1 if post.is_original_content else 0,
             "score": post.score,
-            "selftext": post.selftext,
+            "body": post.selftext,
             "subreddit": str(post.subreddit),
             "upvote_ratio": post.upvote_ratio,
             "url": post.url
         }
-        posts_data.append(post_info)
+
+        conn, cursor = safe_execute(conn, cursor, """
+            INSERT INTO current_posts (
+                author, title, created_utc, id, is_original_content,
+                score, body, subreddit, upvote_ratio, url
+            ) VALUES (
+                :author, :title, :created_utc, :id, :is_original_content,
+                :score, :body, :subreddit, :upvote_ratio, :url
+            )
+        """, post_params)
+
+        max_utc = max(max_utc, post.created_utc)
         time.sleep(1)
 
         post.comments.replace_more(limit=0)
@@ -55,38 +87,25 @@ def get_subreddit_posts_and_comments(reddit, subreddit_name, last_fetched_utc, l
             if comment.created_utc <= last_fetched_utc:
                 continue
 
-            comment_info = {
+            comment_params = {
                 "author": str(comment.author) if comment.author else None,
                 "created_utc": comment.created_utc,
                 "id": comment.id,
                 "parent_post_id": post.id,
                 "score": comment.score,
-                "selftext": comment.body,
+                "body": comment.body,
                 "subreddit": str(post.subreddit)
             }
-            comments_data.append(comment_info)
+
+            conn, cursor = safe_execute(conn, cursor, """
+                INSERT INTO current_comments (
+                    author, created_utc, id, parent_post_id, score, body, subreddit
+                ) VALUES (
+                    :author, :created_utc, :id, :parent_post_id, :score, :body, :subreddit
+                )
+            """, comment_params)
+
             count += 1
             time.sleep(2)
 
-    return posts_data, comments_data
-
-def insert_in_batches(conn, cursor, sql, rows, batch_size=BATCH_SIZE):
-    """Insert rows in batches with automatic reconnect if DB drops."""
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i+batch_size]
-        while True:
-            try:
-                cursor.executemany(sql, batch)
-                conn.commit()
-                print(f"Inserted {len(batch)} rows (up to {i+len(batch)} total)")
-                break
-            except oracledb.DatabaseError as e:
-                print(f"Error inserting batch: {e}")
-                print(f"Attempting to reconnect in {RETRY_DELAY}s...")
-                time.sleep(RETRY_DELAY)
-                new_conn = get_oracle_connection()
-                if new_conn:
-                    conn = new_conn
-                    cursor = conn.cursor()
-                else:
-                    print("Reconnect failed, retrying after delay...")
+    return conn, cursor, max_utc
