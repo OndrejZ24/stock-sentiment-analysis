@@ -1,9 +1,21 @@
 import os
 import time
 import oracledb
+from dotenv import load_dotenv
 import praw
 
+
 RETRY_DELAY = 10  # 
+
+load_dotenv()
+
+reddit = praw.Reddit(
+    client_id=os.getenv("api-client_id"),
+    client_secret=os.getenv("api-client_secret"),
+    user_agent="stock_market_scraper",
+    username=os.getenv("api-username"),
+    password=os.getenv("api-password")
+    )
 
 def get_oracle_connection():
     """Get a new Oracle DB connection from environment variables."""
@@ -52,6 +64,10 @@ def fetch_and_insert_posts_comments(reddit, subreddit_name, last_fetched_utc, co
     for post in subreddit.hot(limit=None):
         if post.created_utc <= last_fetched_utc:
             continue
+    
+        cursor.execute("SELECT id FROM current_posts WHERE id = :id", {"id": post.id})
+        if cursor.fetchone():
+            continue
 
         post_params = {
             "author": str(post.author) if post.author else None,
@@ -86,7 +102,11 @@ def fetch_and_insert_posts_comments(reddit, subreddit_name, last_fetched_utc, co
                 break
             if comment.created_utc <= last_fetched_utc:
                 continue
-
+            
+            cursor.execute("SELECT id FROM current_comments WHERE id = :id", {"id": comment.id})
+            if cursor.fetchone():
+                continue
+            
             comment_params = {
                 "author": str(comment.author) if comment.author else None,
                 "created_utc": comment.created_utc,
