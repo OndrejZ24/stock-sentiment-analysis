@@ -90,11 +90,6 @@ except ImportError:
 # Configuration constants
 RETRY_DELAY = 10
 MIN_TEXT_LENGTH = 10
-# Broadened regex:
-# - $cashtags allow 1-5 letters (e.g., $A, $aapl)
-# - Bare tickers require 2-5 letters (avoid single-letter words like "I")
-# - Optional dot or hyphen class suffix (e.g., BRK.B, BRK-B, AAPL.U)
-# Word boundaries replaced with lookarounds to avoid consuming punctuation
 TICKER_REGEX = r'(?<!\w)(?:\$[A-Za-z]{1,5}|[A-Za-z]{2,5})(?:[.-][A-Za-z]{1,2})?(?!\w)'
 
 # spaCy setup (optional)
@@ -165,11 +160,11 @@ def fetch_and_insert_posts_comments(reddit, subreddit_name, last_fetched_utc, co
     for post in subreddit.hot(limit=None):
         if post.created_utc <= last_fetched_utc:
             continue
-    
+
         cursor.execute("SELECT id FROM current_posts WHERE id = :id", {"id": post.id})
         if cursor.fetchone():
             continue
-    
+
         cursor.execute("SELECT id FROM current_posts WHERE id = :id", {"id": post.id})
         if cursor.fetchone():
             continue
@@ -207,16 +202,16 @@ def fetch_and_insert_posts_comments(reddit, subreddit_name, last_fetched_utc, co
                 break
             if comment.created_utc <= last_fetched_utc:
                 continue
-            
+
             cursor.execute("SELECT id FROM current_comments WHERE id = :id", {"id": comment.id})
             if cursor.fetchone():
                 continue
-            
-            
+
+
             cursor.execute("SELECT id FROM current_comments WHERE id = :id", {"id": comment.id})
             if cursor.fetchone():
                 continue
-            
+
             comment_params = {
                 "author": str(comment.author) if comment.author else None,
                 "created_utc": comment.created_utc,
@@ -251,7 +246,7 @@ def harmonize_schema(df_posts: DataFrameType, df_comments: DataFrameType) -> Dat
     """
     if not PANDAS_AVAILABLE:
         raise ImportError("pandas not available")
-    
+
     # Make copies to avoid side effects
     posts = df_posts.copy()
     comments = df_comments.copy()
@@ -298,7 +293,7 @@ def harmonize_schema(df_posts: DataFrameType, df_comments: DataFrameType) -> Dat
     # comments have no url, posts have no parent_post_id typically
     posts["parent_post_id"] = posts.get("parent_post_id", None)
     comments["url"] = comments.get("url", None)
-    
+
     # unify column ordering (will be flexible)
     unified = pd.concat([posts, comments], ignore_index=True, sort=False)
     logger.info("Harmonized schema. Unified dataframe shape: %s", unified.shape)
@@ -311,7 +306,7 @@ def drop_invalid_texts(df: DataFrameType, min_len: int = MIN_TEXT_LENGTH) -> Dat
     """
     if not PANDAS_AVAILABLE:
         raise ImportError("pandas not available")
-    
+
     df = df.copy()
     # remove NaN / empty
     df = df[df["text"].notna()]
@@ -322,7 +317,6 @@ def drop_invalid_texts(df: DataFrameType, min_len: int = MIN_TEXT_LENGTH) -> Dat
     # remove short texts
     df = df[df["text_stripped"].str.len() > min_len]
     df = df.drop(columns=["text_stripped"])
-    logger.info("Dropped invalid/short texts. Remaining rows: %d", len(df))
     return df
 
 
@@ -332,11 +326,11 @@ def deduplicate_and_normalize_types(df: DataFrameType) -> DataFrameType:
     """
     if not PANDAS_AVAILABLE:
         raise ImportError("pandas not available")
-    
+
     df = df.copy()
     if "id" in df.columns:
         df = df.drop_duplicates(subset=["id"])
-    
+
     # created_utc -> datetime (handles seconds epoch)
     if "created_utc" in df.columns:
         # handle both numeric epochs and SQL datetime strings
@@ -347,7 +341,6 @@ def deduplicate_and_normalize_types(df: DataFrameType) -> DataFrameType:
         )
     if "score" in df.columns:
         df["score"] = pd.to_numeric(df["score"], errors="coerce").fillna(0).astype(int)
-    logger.info("Deduplicated and normalized types.")
     return df
 
 
@@ -355,7 +348,7 @@ def add_temporal_features(df: DataFrameType) -> DataFrameType:
     """Add temporal features based on created_utc column."""
     if not PANDAS_AVAILABLE:
         raise ImportError("pandas not available")
-    
+
     df = df.copy()
     df["date"] = df["created_utc"].dt.date
     df["hour"] = df["created_utc"].dt.hour
@@ -371,12 +364,11 @@ def add_engagement_features(df: DataFrameType) -> DataFrameType:
         raise ImportError("pandas not available")
     if not NUMPY_AVAILABLE:
         raise ImportError("numpy not available")
-    
+
     df = df.copy()
     df["text_length"] = df["text"].astype(str).str.len()
     df["word_count"] = df["text"].astype(str).apply(lambda x: len(x.split()))
-    df["score_log1p"] = np.log1p(df["score"].astype(float))
-    
+
     # upvote_ratio may be missing -> numeric
     if "upvote_ratio" in df.columns:
         try:
@@ -518,21 +510,21 @@ def detect_tickers_in_text(text: str, ticker_set: Set[str]) -> List[str]:
     1. $cashtags (e.g., $AAPL, $TSLA) - these are almost always intentional
     2. ALL-CAPS words that are known tickers (reduces false positives significantly)
     3. Ticker symbols with class suffixes (e.g., BRK.A, BRK-B)
-    
+
     Excludes common English words even if they're valid ticker symbols.
     """
     if not isinstance(text, str) or text.strip() == "" or not ticker_set:
         return []
 
     found_tickers = set()
-    
+
     # Common English words to exclude even if they're valid tickers
     english_words = {
-        'A', 'AM', 'AN', 'AND', 'ARE', 'AS', 'AT', 'BE', 'BY', 'FOR', 'FROM', 
-        'HAS', 'HE', 'IN', 'IS', 'IT', 'ITS', 'OF', 'ON', 'THAT', 'THE', 
-        'TO', 'WAS', 'WILL', 'WITH', 'YOU', 'YOUR', 'ALL', 'BUT', 'CAN', 
-        'HAD', 'HER', 'HIM', 'HOW', 'MAN', 'NEW', 'NOW', 'OLD', 'SEE', 
-        'TWO', 'WHO', 'BOY', 'DID', 'GET', 'LET', 'MAY', 'PUT', 'SAY', 
+        'A', 'AM', 'AN', 'AND', 'ARE', 'AS', 'AT', 'BE', 'BY', 'FOR', 'FROM',
+        'HAS', 'HE', 'IN', 'IS', 'IT', 'ITS', 'OF', 'ON', 'THAT', 'THE',
+        'TO', 'WAS', 'WILL', 'WITH', 'YOU', 'YOUR', 'ALL', 'BUT', 'CAN',
+        'HAD', 'HER', 'HIM', 'HOW', 'MAN', 'NEW', 'NOW', 'OLD', 'SEE',
+        'TWO', 'WHO', 'BOY', 'DID', 'GET', 'LET', 'MAY', 'PUT', 'SAY',
         'SHE', 'TOO', 'USE', 'WAY', 'WE', 'WELL', 'WERE', 'WHAT', 'WHEN',
         'WHERE', 'WHICH', 'WHO', 'WHY', 'WOULD', 'YEAR', 'YES', 'YET',
         'GOOD', 'GREAT', 'BEST', 'BETTER', 'MUCH', 'MORE', 'MOST', 'VERY',
@@ -550,7 +542,7 @@ def detect_tickers_in_text(text: str, ticker_set: Set[str]) -> List[str]:
         'WELL', 'WENT', 'WHAT', 'WHEN', 'WHERE', 'WHILE', 'WORK', 'WORLD',
         'WRITE', 'YEAR', 'YOUNG', 'YOUR', 'TAX', 'BEAT', 'EA', 'LE'
     }
-    
+
     # 1. Find $cashtags (always include these - they're intentional ticker mentions)
     cashtag_pattern = r'\$([A-Za-z]{1,5}(?:[.-][A-Za-z]{1,2})?)\b'
     for match in re.finditer(cashtag_pattern, text):
@@ -561,28 +553,28 @@ def detect_tickers_in_text(text: str, ticker_set: Set[str]) -> List[str]:
             variants.append(ticker.replace(".", "-"))
         if "-" in ticker:
             variants.append(ticker.replace("-", "."))
-        
+
         for variant in variants:
             if variant in ticker_set:
                 found_tickers.add(variant)
                 break
-    
+
     # 2. Find ALL-CAPS words that are known tickers (more restrictive)
     caps_pattern = r'\b([A-Z]{2,5}(?:[.-][A-Z]{1,2})?)\b'
     for match in re.finditer(caps_pattern, text):
         ticker = match.group(1)
-        
+
         # Skip common English words
         if ticker in english_words:
             continue
-            
+
         # Normalize variants
         variants = [ticker]
         if "." in ticker:
             variants.append(ticker.replace(".", "-"))
         if "-" in ticker:
             variants.append(ticker.replace("-", "."))
-        
+
         for variant in variants:
             if variant in ticker_set:
                 found_tickers.add(variant)
@@ -595,11 +587,10 @@ def apply_ticker_detection(df: DataFrameType, tickers_df: DataFrameType) -> Data
     """Apply ticker detection to the text column and add exchange information."""
     if not PANDAS_AVAILABLE:
         raise ImportError("pandas not available")
-    
+
     df = df.copy()
     ticker_set = set(tickers_df["ticker"].tolist())
-    logger.info("Detecting tickers in text (this may take a while)...")
-    
+
     if TQDM_AVAILABLE:
         df["mentioned_tickers"] = df["text"].progress_apply(
             lambda x: detect_tickers_in_text(x, ticker_set)
@@ -608,61 +599,113 @@ def apply_ticker_detection(df: DataFrameType, tickers_df: DataFrameType) -> Data
         df["mentioned_tickers"] = df["text"].apply(
             lambda x: detect_tickers_in_text(x, ticker_set)
         )
-    
+
     df["n_tickers"] = df["mentioned_tickers"].apply(lambda lst: len(lst))
-    
+
     # Add exchange information
     # Create a mapping of ticker -> exchange
     ticker_to_exchange = dict(zip(tickers_df["ticker"], tickers_df["exchange"]))
-    
+
     def get_ticker_exchanges(ticker_list):
         """Determine which exchanges are represented in the ticker list."""
         if not ticker_list or len(ticker_list) == 0:
             return ""
-        
+
         exchanges = set()
         for ticker in ticker_list:
             exchange = ticker_to_exchange.get(ticker)
             if exchange:
                 exchanges.add(exchange)
-        
+
         if len(exchanges) == 0:
             return ""
         elif len(exchanges) == 1:
             return list(exchanges)[0]
         else:
             return "BOTH"
-    
+
     df["ticker_exchanges"] = df["mentioned_tickers"].apply(get_ticker_exchanges)
-    
+
     return df
 
+def inherit_parent_tickers(row):
+        if row['type'] == 'comment':
+            parent_id = row.get('parent_post_id')
+            if pd.notna(parent_id) and parent_id in post_ticker_map:
+                # Get comment's own tickers
+                own_tickers = set()
+                tickers_data = row.get('mentioned_tickers')
+
+                # Check if comment has tickers
+                if isinstance(tickers_data, str) and tickers_data.strip():
+                    own_tickers = set(tickers_data.split(','))
+                elif isinstance(tickers_data, (list, set, np.ndarray)) and len(tickers_data) > 0:
+                    own_tickers = set(tickers_data)
+
+                parent_tickers = post_ticker_map[parent_id]
+                merged_tickers = own_tickers.union(parent_tickers)
+
+                return ','.join(sorted(merged_tickers)) if merged_tickers else ''
+
+        # For posts or comments without parent tickers, just format existing tickers
+        tickers_data = row.get('mentioned_tickers', '')
+        if isinstance(tickers_data, list):
+            return ','.join(sorted(tickers_data)) if tickers_data else ''
+        return tickers_data if isinstance(tickers_data, str) else ''
 
 def normalize_text_for_sentiment(text: str, keep_tickers: bool = True) -> str:
     """
-    Light normalization targeted for VADER / transformer models:
+    Light normalization targeted for transformer models:
     - removes URLs
     - removes markdown links
     - strips excessive punctuation / whitespace
-    - keeps $TICKER or TICKER optionally
+    - lowercases text
+    - keeps $TICKER or TICKER optionally (preserves original case)
     """
     if not isinstance(text, str):
         return ""
-    
+
     s = text
-    # remove URLs
+
+    # Step 1: Extract tickers BEFORE any transformation (if keeping them)
+    ticker_positions = []
+    if keep_tickers:
+        # Find all ticker matches with their positions
+        for match in re.finditer(TICKER_REGEX, s):
+            ticker_positions.append((match.start(), match.end(), match.group()))
+
+    # Step 2: Remove URLs
     s = re.sub(r'http\S+', ' ', s)
     s = re.sub(r'\[([^\]]+)\]\((?:http\S+)\)', r'\1', s)  # markdown links -> keep text
-    
-    # optionally keep ticker tokens as-is; otherwise lowercase everything
-    # Replace non-alphanumeric except $ (for $TICKER) and whitespace
-    if keep_tickers:
-        s = re.sub(r'[^A-Za-z0-9\$\s]', ' ', s)
-    else:
-        s = re.sub(r'[^A-Za-z0-9\s]', ' ', s)
-        s = s.lower()
-    
+
+    # Step 3: Replace tickers with placeholders to protect them
+    if keep_tickers and ticker_positions:
+        # Sort by position in reverse to replace from end to start (avoid offset issues)
+        ticker_map = {}
+        offset = 0
+        new_text = s
+        for i, (start, end, ticker) in enumerate(ticker_positions):
+            placeholder = f"__TICKER{i}__"
+            ticker_map[placeholder] = ticker.upper()  # Store uppercase ticker
+            # Adjust position for previous replacements
+            adj_start = start + offset
+            adj_end = end + offset
+            new_text = new_text[:adj_start] + placeholder + new_text[adj_end:]
+            offset += len(placeholder) - (end - start)
+        s = new_text
+
+    # Step 4: Remove punctuation and lowercase
+    s = re.sub(r'[^A-Za-z0-9_\s]', ' ', s)  # Keep underscores for placeholders
+    s = s.lower()
+
+    # Step 5: Normalize whitespace
     s = re.sub(r'\s+', ' ', s).strip()
+
+    # Step 6: Restore tickers in uppercase
+    if keep_tickers and ticker_positions:
+        for placeholder, ticker in ticker_map.items():
+            s = s.replace(placeholder.lower(), ticker)
+
     return s
 
 
@@ -670,9 +713,9 @@ def apply_text_normalization(df: DataFrameType, keep_tickers: bool = True) -> Da
     """Apply text normalization to prepare for sentiment analysis."""
     if not PANDAS_AVAILABLE:
         raise ImportError("pandas not available")
-    
+
     df = df.copy()
-    
+
     if TQDM_AVAILABLE:
         df["sentiment_ready_text"] = df["text"].progress_apply(
             lambda x: normalize_text_for_sentiment(x, keep_tickers)
@@ -681,7 +724,7 @@ def apply_text_normalization(df: DataFrameType, keep_tickers: bool = True) -> Da
         df["sentiment_ready_text"] = df["text"].apply(
             lambda x: normalize_text_for_sentiment(x, keep_tickers)
         )
-    
+
     return df
 
 
@@ -697,13 +740,13 @@ def check_dependencies():
         "dotenv": DOTENV_AVAILABLE,
         "spacy": SPACY_AVAILABLE
     }
-    
+
     print("Dependency Status:")
     print("=" * 40)
     for dep, available in deps.items():
         status = "✅ Available" if available else "❌ Not Available"
         print(f"{dep:12} : {status}")
-    
+
     return deps
 
 
@@ -713,12 +756,12 @@ def remove_financial_stopwords(text: str, preserve_tickers: bool = True) -> str:
     """
     if not isinstance(text, str):
         return ""
-    
+
     # Try to use NLTK stopwords, fall back to basic list if not available
     try:
         import nltk
         from nltk.corpus import stopwords
-        
+
         # Download stopwords if not already present (with error handling)
         try:
             nltk.data.find('corpora/stopwords')
@@ -728,7 +771,7 @@ def remove_financial_stopwords(text: str, preserve_tickers: bool = True) -> str:
             except Exception:
                 logger.warning("Could not download NLTK stopwords, using basic list")
                 raise ImportError("NLTK stopwords not available")
-        
+
         english_stopwords = set(stopwords.words('english'))
     except (ImportError, Exception):
         # Fallback to basic stopwords list
@@ -749,44 +792,41 @@ def remove_financial_stopwords(text: str, preserve_tickers: bool = True) -> str:
             'before', 'after', 'above', 'below', 'up', 'down', 'in', 'out',
             'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once'
         }
-    
-    # Financial terms to preserve (common sentiment-relevant words)
-    financial_keep_words = {
-        'buy', 'sell', 'hold', 'bull', 'bear', 'bullish', 'bearish',
-        'up', 'down', 'rise', 'fall', 'drop', 'crash', 'moon', 'rocket',
-        'high', 'low', 'target', 'price', 'value', 'worth', 'cheap', 'expensive',
-        'calls', 'puts', 'options', 'long', 'short', 'profit', 'loss', 'gain',
-        'strong', 'weak', 'good', 'bad', 'great', 'terrible', 'excellent',
-        'positive', 'negative', 'optimistic', 'pessimistic'
-    }
-    
+
     # Extract tickers if preserving them
     tickers = set()
     if preserve_tickers:
         ticker_matches = re.findall(TICKER_REGEX, text)
         tickers = {match.upper() for match in ticker_matches}
-    
+
     # Split and filter words
     words = text.split()
     filtered_words = []
-    
+
     for word in words:
-        # Clean word for comparison (remove punctuation except $)
-        word_clean = re.sub(r'[^\w$]', '', word).lower()
+        # Skip empty words
+        if not word or not word.strip():
+            continue
+
+        # Clean word for comparison (remove punctuation)
+        word_clean = re.sub(r'[^\w]', '', word).lower()
+
+        # Skip if nothing left after cleaning
+        if not word_clean:
+            continue
+
         word_upper = word.upper()
-        
+
         # Keep if:
-        # 1. It's a ticker symbol
-        # 2. It's a financial term we want to preserve
-        # 3. It's not a stopword
-        # 4. It's a number or contains digits (financial amounts, percentages)
-        if (preserve_tickers and word_upper in tickers or
-            word_clean in financial_keep_words or
-            word_clean not in english_stopwords or
-            any(char.isdigit() for char in word_clean) or
-            '$' in word):
+        # 1. It's a ticker symbol (preserve tickers if requested)
+        # 2. It's NOT a stopword
+        is_ticker = preserve_tickers and word_upper in tickers
+        is_stopword = word_clean in english_stopwords
+
+        # Keep word if it's a ticker OR if it's not a stopword
+        if is_ticker or not is_stopword:
             filtered_words.append(word)
-    
+
     return ' '.join(filtered_words)
 
 
@@ -797,10 +837,10 @@ def remove_stopwords_spacy(text: str, preserve_tickers: bool = True) -> str:
     """
     if not isinstance(text, str):
         return ""
-    
+
     try:
         import spacy
-        
+
         # Try to load English model
         try:
             nlp = spacy.load("en_core_web_sm")
@@ -808,48 +848,37 @@ def remove_stopwords_spacy(text: str, preserve_tickers: bool = True) -> str:
             logger.warning("spaCy English model not found. Install with: python -m spacy download en_core_web_sm")
             # Fall back to NLTK method
             return remove_financial_stopwords(text, preserve_tickers)
-        
-        # Financial terms to preserve
-        financial_keep_words = {
-            'buy', 'sell', 'hold', 'bull', 'bear', 'bullish', 'bearish',
-            'up', 'down', 'rise', 'fall', 'drop', 'crash', 'moon', 'rocket',
-            'high', 'low', 'target', 'price', 'value', 'worth', 'cheap', 'expensive',
-            'calls', 'puts', 'options', 'long', 'short', 'profit', 'loss', 'gain',
-            'strong', 'weak', 'good', 'bad', 'great', 'terrible', 'excellent',
-            'positive', 'negative', 'optimistic', 'pessimistic'
-        }
-        
+
         # Extract tickers if preserving them
         tickers = set()
         if preserve_tickers:
             ticker_matches = re.findall(TICKER_REGEX, text)
             tickers = {match.upper() for match in ticker_matches}
-        
+
         # Process with spaCy
         doc = nlp(text)
         filtered_tokens = []
-        
+
         for token in doc:
             token_text = token.text
-            token_lower = token.text.lower()
             token_upper = token.text.upper()
-            
+
+            # Skip empty or whitespace-only tokens
+            if not token_text or not token_text.strip():
+                continue
+
             # Keep if:
-            # 1. It's a ticker symbol
-            # 2. It's a financial term we want to preserve
-            # 3. It's not a stopword
-            # 4. It's not punctuation (except $ signs)
-            # 5. It contains digits
-            if (preserve_tickers and token_upper in tickers or
-                token_lower in financial_keep_words or
-                not token.is_stop or
-                token.like_num or
-                '$' in token_text or
-                (not token.is_punct or '$' in token_text)):
+            # 1. It's a ticker symbol (preserve tickers if requested)
+            # 2. It's NOT a stopword AND not punctuation
+            is_ticker = preserve_tickers and token_upper in tickers
+            is_content_word = not token.is_stop and not token.is_punct
+
+            # Keep word if it's a ticker OR if it's content word
+            if is_ticker or is_content_word:
                 filtered_tokens.append(token_text)
-        
+
         return ' '.join(filtered_tokens)
-        
+
     except ImportError:
         logger.warning("spaCy not available, falling back to NLTK method")
         return remove_financial_stopwords(text, preserve_tickers)

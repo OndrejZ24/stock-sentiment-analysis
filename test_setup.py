@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script na to ze mas vsechno rdy. Od Simona s laskou.
+Test script na to ze mas vsechno rdy. Od Clauda a Simona (nekdo z nich na tom mel o chlup vetsi zasluhu) s laskou.
 """
 
 import sys
@@ -112,8 +112,7 @@ def main():
         print("🎉 All tests passed! System is ready.")
         print("\nNext steps:")
         print("1. Set up your .env file with database and Reddit API credentials")
-        print("2. Run the data-import notebook to fetch Reddit data")
-        print("3. Run the preprocessing notebook to clean and enrich the data")
+        print("2. Run the preprocessing notebook to clean and enrich the data")
         return 0
     else:
         print("❌ Some tests failed. Please fix the issues above.")
