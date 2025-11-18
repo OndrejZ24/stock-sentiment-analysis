@@ -291,8 +291,8 @@ def harmonize_schema(df_posts: DataFrameType, df_comments: DataFrameType) -> Dat
     comments["type"] = "comment"
 
     # comments have no url, posts have no parent_post_id typically
-    posts["parent_post_id"] = posts.get("parent_post_id", None)
-    comments["url"] = comments.get("url", None)
+    # These columns should already exist from the "Ensure missing columns exist" section above
+    # No need to overwrite them here
 
     # unify column ordering (will be flexible)
     unified = pd.concat([posts, comments], ignore_index=True, sort=False)
@@ -602,56 +602,8 @@ def apply_ticker_detection(df: DataFrameType, tickers_df: DataFrameType) -> Data
 
     df["n_tickers"] = df["mentioned_tickers"].apply(lambda lst: len(lst))
 
-    # Add exchange information
-    # Create a mapping of ticker -> exchange
-    ticker_to_exchange = dict(zip(tickers_df["ticker"], tickers_df["exchange"]))
-
-    def get_ticker_exchanges(ticker_list):
-        """Determine which exchanges are represented in the ticker list."""
-        if not ticker_list or len(ticker_list) == 0:
-            return ""
-
-        exchanges = set()
-        for ticker in ticker_list:
-            exchange = ticker_to_exchange.get(ticker)
-            if exchange:
-                exchanges.add(exchange)
-
-        if len(exchanges) == 0:
-            return ""
-        elif len(exchanges) == 1:
-            return list(exchanges)[0]
-        else:
-            return "BOTH"
-
-    df["ticker_exchanges"] = df["mentioned_tickers"].apply(get_ticker_exchanges)
-
     return df
 
-def inherit_parent_tickers(row):
-        if row['type'] == 'comment':
-            parent_id = row.get('parent_post_id')
-            if pd.notna(parent_id) and parent_id in post_ticker_map:
-                # Get comment's own tickers
-                own_tickers = set()
-                tickers_data = row.get('mentioned_tickers')
-
-                # Check if comment has tickers
-                if isinstance(tickers_data, str) and tickers_data.strip():
-                    own_tickers = set(tickers_data.split(','))
-                elif isinstance(tickers_data, (list, set, np.ndarray)) and len(tickers_data) > 0:
-                    own_tickers = set(tickers_data)
-
-                parent_tickers = post_ticker_map[parent_id]
-                merged_tickers = own_tickers.union(parent_tickers)
-
-                return ','.join(sorted(merged_tickers)) if merged_tickers else ''
-
-        # For posts or comments without parent tickers, just format existing tickers
-        tickers_data = row.get('mentioned_tickers', '')
-        if isinstance(tickers_data, list):
-            return ','.join(sorted(tickers_data)) if tickers_data else ''
-        return tickers_data if isinstance(tickers_data, str) else ''
 
 def normalize_text_for_sentiment(text: str, keep_tickers: bool = True) -> str:
     """
@@ -882,6 +834,87 @@ def remove_stopwords_spacy(text: str, preserve_tickers: bool = True) -> str:
     except ImportError:
         logger.warning("spaCy not available, falling back to NLTK method")
         return remove_financial_stopwords(text, preserve_tickers)
+
+
+def load_ticker_stopwords() -> Set[str]:
+    """
+    Load ticker stopwords from JSON file.
+    Returns a set of uppercase words that should NOT be considered valid tickers.
+    """
+    import json
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    stopwords_path = os.path.join(script_dir, 'ticker_stopwords.json')
+
+    try:
+        with open(stopwords_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Get stopwords from the flat list
+        stopwords = set(data.get('stopwords', []))
+
+        # Ensure all are uppercase
+        stopwords = {word.upper() for word in stopwords}
+
+        logger.info(f"Loaded {len(stopwords)} ticker stopwords")
+        return stopwords
+
+    except FileNotFoundError:
+        logger.warning(f"Ticker stopwords file not found at {stopwords_path}")
+        logger.warning("Using empty stopwords set - no filtering will occur")
+        return set()
+    except Exception as e:
+        logger.warning(f"Error loading ticker stopwords: {e}")
+        return set()
+
+
+def filter_ticker_stopwords(ticker_list: List[str], stopwords: Set[str]) -> List[str]:
+    """
+    Filter out false positive tickers from a list.
+
+    Args:
+        ticker_list: List of ticker symbols
+        stopwords: Set of words that should not be considered tickers
+
+    Returns:
+        Filtered list of valid tickers
+    """
+    if not ticker_list or len(ticker_list) == 0:
+        return []
+
+    return [ticker for ticker in ticker_list if ticker.upper() not in stopwords]
+
+
+def apply_ticker_stopword_filter(df: DataFrameType, stopwords: Set[str]) -> DataFrameType:
+    """
+    Apply ticker stopword filtering to a DataFrame with mentioned_tickers column.
+    Updates mentioned_tickers and n_tickers columns.
+
+    Args:
+        df: DataFrame with mentioned_tickers column (list of tickers)
+        stopwords: Set of words to filter out
+
+    Returns:
+        DataFrame with filtered tickers
+    """
+    if not PANDAS_AVAILABLE:
+        raise ImportError("pandas not available")
+
+    df = df.copy()
+
+    # Filter the ticker lists
+    df['mentioned_tickers'] = df['mentioned_tickers'].apply(
+        lambda x: filter_ticker_stopwords(x, stopwords) if isinstance(x, list) else []
+    )
+
+    # Update ticker count
+    df['n_tickers'] = df['mentioned_tickers'].apply(len)
+
+    filtered_count = len(df[df['n_tickers'] > 0])
+    logger.info(f"After stopword filtering: {filtered_count} rows with valid tickers")
+
+    return df
+
 
 
 
