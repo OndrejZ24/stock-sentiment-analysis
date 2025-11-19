@@ -92,19 +92,23 @@ RETRY_DELAY = 10
 MIN_TEXT_LENGTH = 10
 TICKER_REGEX = r'(?<!\w)(?:\$[A-Za-z]{1,5}|[A-Za-z]{2,5})(?:[.-][A-Za-z]{1,2})?(?!\w)'
 
-# spaCy setup (optional)
-USE_SPACY = False
+# spaCy setup (optional) - Load model once at module level for performance
+_SPACY_NLP = None  # Global spaCy model instance
+SPACY_AVAILABLE = False
+
 try:
-    if USE_SPACY:
-        import spacy
-        nlp = spacy.load("en_core_web_sm")
+    import spacy
+    try:
+        _SPACY_NLP = spacy.load("en_core_web_sm")
         SPACY_AVAILABLE = True
-    else:
-        nlp = None
+        logger.info("spaCy model loaded successfully")
+    except OSError:
+        logger.warning("spaCy model 'en_core_web_sm' not found. Install with: python -m spacy download en_core_web_sm")
+        _SPACY_NLP = None
         SPACY_AVAILABLE = False
-except (ImportError, OSError):
-    USE_SPACY = False
-    nlp = None
+except ImportError:
+    logger.warning("spaCy not installed")
+    _SPACY_NLP = None
     SPACY_AVAILABLE = False
 
 # Setup progress_apply if both pandas and tqdm are available
@@ -165,10 +169,6 @@ def fetch_and_insert_posts_comments(reddit, subreddit_name, last_fetched_utc, co
         if cursor.fetchone():
             continue
 
-        cursor.execute("SELECT id FROM current_posts WHERE id = :id", {"id": post.id})
-        if cursor.fetchone():
-            continue
-
         post_params = {
             "author": str(post.author) if post.author else None,
             "title": post.title,
@@ -202,11 +202,6 @@ def fetch_and_insert_posts_comments(reddit, subreddit_name, last_fetched_utc, co
                 break
             if comment.created_utc <= last_fetched_utc:
                 continue
-
-            cursor.execute("SELECT id FROM current_comments WHERE id = :id", {"id": comment.id})
-            if cursor.fetchone():
-                continue
-
 
             cursor.execute("SELECT id FROM current_comments WHERE id = :id", {"id": comment.id})
             if cursor.fetchone():
@@ -785,30 +780,25 @@ def remove_financial_stopwords(text: str, preserve_tickers: bool = True) -> str:
 def remove_stopwords_spacy(text: str, preserve_tickers: bool = True) -> str:
     """
     Alternative stopword removal using spaCy (more advanced).
-    Use this if you have spaCy installed and want better language processing.
+    Uses pre-loaded global spaCy model for better performance.
     """
     if not isinstance(text, str):
         return ""
 
+    # Use pre-loaded global spaCy model
+    if not SPACY_AVAILABLE or _SPACY_NLP is None:
+        # Fall back to NLTK method if spaCy not available
+        return remove_financial_stopwords(text, preserve_tickers)
+
     try:
-        import spacy
-
-        # Try to load English model
-        try:
-            nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            logger.warning("spaCy English model not found. Install with: python -m spacy download en_core_web_sm")
-            # Fall back to NLTK method
-            return remove_financial_stopwords(text, preserve_tickers)
-
         # Extract tickers if preserving them
         tickers = set()
         if preserve_tickers:
             ticker_matches = re.findall(TICKER_REGEX, text)
             tickers = {match.upper() for match in ticker_matches}
 
-        # Process with spaCy
-        doc = nlp(text)
+        # Process with pre-loaded spaCy model (NO LOADING HERE - HUGE PERFORMANCE GAIN)
+        doc = _SPACY_NLP(text)
         filtered_tokens = []
 
         for token in doc:
@@ -831,8 +821,9 @@ def remove_stopwords_spacy(text: str, preserve_tickers: bool = True) -> str:
 
         return ' '.join(filtered_tokens)
 
-    except ImportError:
-        logger.warning("spaCy not available, falling back to NLTK method")
+    except Exception as e:
+        logger.warning(f"spaCy processing error: {e}, falling back to NLTK method")
+        return remove_financial_stopwords(text, preserve_tickers)
         return remove_financial_stopwords(text, preserve_tickers)
 
 
