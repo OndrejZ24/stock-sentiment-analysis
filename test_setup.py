@@ -73,8 +73,8 @@ def test_file_structure():
     
     required_files = [
         "utils.py",
-        "preprocessing.ipynb", 
-        "data-import.ipynb"
+        "preprocessing.ipynb",
+        "finbert_model.ipynb"
     ]
     
     missing_files = []
@@ -111,7 +111,7 @@ def main():
     if all_tests_passed:
         print("🎉 All tests passed! System is ready.")
         print("\nNext steps:")
-        print("1. Set up your .env file with database and Reddit API credentials")
+        print("1. Set up your .env file with database credentials")
         print("2. Run the preprocessing notebook to clean and enrich the data")
         return 0
     else:

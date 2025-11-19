@@ -3,3 +3,4 @@
 .vscode/
 __pycache__/
 sentiment_ready_data.csv
+outputs/
