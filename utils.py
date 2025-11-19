@@ -808,7 +808,52 @@ def apply_ticker_stopword_filter(df: DataFrameType, stopwords: Set[str]) -> Data
 
     return df
 
+def score_texts(texts):
+    """
+    Run FinBERT on a list of texts and return structured sentiment info.
 
+    Parameters
+    ----------
+    texts : list of str
+        The input texts to classify.
+
+    Returns
+    -------
+    results : list of dict
+        Each dict has:
+        - sentiment_label : str       ('positive', 'neutral', 'negative')
+        - sentiment_score : float     (p_pos - p_neg in [-1, 1])
+        - p_pos, p_neu, p_neg : float (probabilities)
+    """
+    # This calls the HF pipeline once for the whole batch
+    outputs = sentiment_pipe(texts)
+
+    results = []
+    for out in outputs:
+        # out is a list like:
+        # [{'label': 'positive', 'score': 0.7}, {'label': 'neutral', 'score': 0.2}, {'label': 'negative', 'score': 0.1}]
+        # Normalize label names to lowercase to be robust to variations
+        probs = {d["label"].lower(): float(d["score"]) for d in out}
+
+        p_pos = probs.get("positive", 0.0)
+        p_neg = probs.get("negative", 0.0)
+        p_neu = probs.get("neutral", 0.0)
+
+        # Continuous sentiment score in [-1, 1]
+        sentiment_score = p_pos - p_neg
+
+        # Discrete label = argmax over the three probabilities
+        sentiment_label = max(probs, key=probs.get)
+
+        results.append({
+            "sentiment_label": sentiment_label,
+            "sentiment_score": sentiment_score,
+            "p_pos": p_pos,
+            "p_neu": p_neu,
+            "p_neg": p_neg
+        })
+
+    return results
 
 
 
