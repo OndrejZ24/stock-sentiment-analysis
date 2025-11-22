@@ -11,6 +11,7 @@ import urllib.request
 from io import StringIO
 import logging
 from typing import List, Set, Any, TYPE_CHECKING, TypeAlias
+import yfinance as yf
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -855,6 +856,7 @@ def score_texts(texts):
 
     return results
 
-
-
-
+def fetch_historical_prices(ticker, start_date, end_date) -> DataFrameType:
+    stock = yf.Ticker(ticker)
+    hist = stock.history(start=start_date, end=end_date)
+    return hist
