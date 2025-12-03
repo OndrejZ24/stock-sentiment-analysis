@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Sentiment Analysis - Trading Signals</title>
+
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Plotly JS -->
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px 0;
+        }
+
+        .main-container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            padding: 30px;
+            margin: 20px auto;
+            max-width: 1400px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 3px solid #667eea;
+        }
+
+        .header h1 {
+            color: #667eea;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 1.1rem;
+        }
+
+        .date-selector {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+
+        .signal-card {
+            border-radius: 10px;
+            margin-bottom: 20px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer;
+        }
+
+        .signal-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.15);
+        }
+
+        .signal-card.buy {
+            border-left: 5px solid #28a745;
+        }
+
+        .signal-card.sell {
+            border-left: 5px solid #dc3545;
+        }
+
+        .badge-buy {
+            background-color: #28a745;
+        }
+
+        .badge-sell {
+            background-color: #dc3545;
+        }
+
+        .metric {
+            display: inline-block;
+            margin: 5px 10px 5px 0;
+        }
+
+        .metric-label {
+            color: #666;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .metric-value {
+            color: #333;
+            font-size: 1.1rem;
+            font-weight: bold;
+        }
+
+        .stats-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .stats-box h3 {
+            margin: 0;
+            font-size: 2.5rem;
+        }
+
+        .stats-box p {
+            margin: 5px 0 0 0;
+            opacity: 0.9;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .spinner-border {
+            width: 3rem;
+            height: 3rem;
+        }
+
+        .modal-dialog {
+            max-width: 90%;
+        }
+
+        .chart-container {
+            margin: 20px 0;
+        }
+
+        .no-signals {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+
+        .no-signals i {
+            font-size: 4rem;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="main-container">
+            <!-- Header -->
+            <div class="header">
+                <h1>Stock Sentiment Trading Signals</h1>
+                <p>NLP model powered buy/sell recommendations based on Reddit sentiment</p>
+            </div>
+
+            <!-- Date Selector -->
+            <div class="date-selector">
+                <div class="row align-items-center">
+                    <div class="col-md-6">
+                        <label for="dateSelect" class="form-label"><strong>Select Date:</strong></label>
+                        <select id="dateSelect" class="form-select form-select-lg">
+                            {% for date in available_dates %}
+                            <option value="{{ date }}" {% if date == default_date %}selected{% endif %}>
+                                {{ date }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <button class="btn btn-primary btn-lg w-100 mt-4" onclick="loadSignals()">
+                            Show Signals
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loading Indicator -->
+            <div id="loading" class="loading" style="display: none;">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <p class="mt-3">Loading trading signals...</p>
+            </div>
+
+            <!-- Statistics Summary -->
+            <div id="stats" style="display: none;">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="stats-box" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%);">
+                            <h3 id="buyCount">0</h3>
+                            <p>BUY Signals</p>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="stats-box" style="background: linear-gradient(135deg, #dc3545 0%, #fd7e14 100%);">
+                            <h3 id="sellCount">0</h3>
+                            <p>SELL Signals</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Buy Signals Section -->
+            <div id="buySection" style="display: none;">
+                <h2 class="mt-4 mb-3">BUY Recommendations</h2>
+                <div id="buySignals" class="row"></div>
+            </div>
+
+            <!-- Sell Signals Section -->
+            <div id="sellSection" style="display: none;">
+                <h2 class="mt-4 mb-3">SELL Recommendations</h2>
+                <div id="sellSignals" class="row"></div>
+            </div>
+
+            <!-- No Signals Message -->
+            <div id="noSignals" class="no-signals" style="display: none;">
+                <div>No Data</div>
+                <h3>No Trading Signals</h3>
+                <p>No buy or sell signals were generated for the selected date.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for Ticker Details -->
+    <div class="modal fade" id="tickerModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalTitle">Ticker Details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="modalLoading" class="loading">
+                        <div class="spinner-border text-primary" role="status"></div>
+                        <p class="mt-3">Loading charts...</p>
+                    </div>
+                    <div id="modalContent" style="display: none;">
+                        <!-- Sentiment Chart -->
+                        <div class="chart-container">
+                            <div id="sentimentChart"></div>
+                        </div>
+
+                        <!-- Summary Statistics -->
+                        <div id="summaryStats" class="mt-4" style="display: none;">
+                            <h6 class="text-muted mb-3">Summary Statistics (30 Days)</h6>
+                            <div class="row">
+                                <div class="col-md-3">
+                                    <div class="card border-0 bg-light">
+                                        <div class="card-body text-center p-3">
+                                            <small class="text-muted d-block">Avg Sentiment</small>
+                                            <h5 class="mb-0" id="avgSentiment">-</h5>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="card border-0 bg-light">
+                                        <div class="card-body text-center p-3">
+                                            <small class="text-muted d-block">Total Mentions</small>
+                                            <h5 class="mb-0" id="totalMentions">-</h5>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="card border-0 bg-light">
+                                        <div class="card-body text-center p-3">
+                                            <small class="text-muted d-block">Max Z-Score</small>
+                                            <h5 class="mb-0" id="maxZScore">-</h5>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="card border-0 bg-light">
+                                        <div class="card-body text-center p-3">
+                                            <small class="text-muted d-block">Window Sentiment</small>
+                                            <h5 class="mb-0" id="windowSentiment">-</h5>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+        // Load signals on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadSignals();
+        });
+
+        function loadSignals() {
+            const date = document.getElementById('dateSelect').value;
+
+            // Show loading
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('stats').style.display = 'none';
+            document.getElementById('buySection').style.display = 'none';
+            document.getElementById('sellSection').style.display = 'none';
+            document.getElementById('noSignals').style.display = 'none';
+
+            // Fetch signals
+            fetch(`/signals/${date}`)
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('loading').style.display = 'none';
+
+                    if (!data.success) {
+                        document.getElementById('noSignals').style.display = 'block';
+                        return;
+                    }
+
+                    // Update statistics
+                    document.getElementById('buyCount').textContent = data.total_buy;
+                    document.getElementById('sellCount').textContent = data.total_sell;
+                    document.getElementById('stats').style.display = 'block';
+
+                    // Display buy signals
+                    if (data.buy_signals.length > 0) {
+                        document.getElementById('buySection').style.display = 'block';
+                        displaySignals(data.buy_signals, 'buySignals', 'buy');
+                    }
+
+                    // Display sell signals
+                    if (data.sell_signals.length > 0) {
+                        document.getElementById('sellSection').style.display = 'block';
+                        displaySignals(data.sell_signals, 'sellSignals', 'sell');
+                    }
+
+                    if (data.total_buy === 0 && data.total_sell === 0) {
+                        document.getElementById('noSignals').style.display = 'block';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('noSignals').style.display = 'block';
+                });
+        }
+
+        function displaySignals(signals, containerId, type) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+
+            signals.forEach(signal => {
+                const card = document.createElement('div');
+                card.className = 'col-md-6 col-lg-4';
+                card.innerHTML = `
+                    <div class="card signal-card ${type}" onclick="showTickerDetails('${signal.ticker}', '${signal.signal_date}')">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-start mb-2">
+                                <h4 class="card-title mb-0">${signal.ticker}</h4>
+                                <span class="badge badge-${type}">${signal.signal_type}</span>
+                            </div>
+                            <div class="mt-3">
+                                <p class="text-muted mb-1">Date: ${signal.signal_date}</p>
+                                <p class="text-muted mb-0">Recommendation: <strong>${signal.signal_type}</strong></p>
+                            </div>
+                            <div class="mt-3">
+                                <small class="text-muted">Click to view detailed charts</small>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        function showTickerDetails(ticker, date) {
+            const modal = new bootstrap.Modal(document.getElementById('tickerModal'));
+
+            // Reset modal
+            document.getElementById('modalTitle').textContent = `${ticker} - Sentiment Analysis`;
+            document.getElementById('modalLoading').style.display = 'block';
+            document.getElementById('modalContent').style.display = 'none';
+            document.getElementById('summaryStats').style.display = 'none';
+
+            modal.show();
+
+            // Load sentiment chart
+            fetch(`/chart/sentiment/${ticker}/${date}`)
+            .then(response => response.json())
+            .then(sentimentData => {
+                document.getElementById('modalLoading').style.display = 'none';
+                document.getElementById('modalContent').style.display = 'block';
+
+                // Display sentiment chart
+                if (sentimentData.success) {
+                    const sentimentChart = JSON.parse(sentimentData.chart);
+                    Plotly.newPlot('sentimentChart', sentimentChart.data, sentimentChart.layout);
+
+                    // Display summary statistics
+                    if (sentimentData.summary) {
+                        document.getElementById('avgSentiment').textContent = sentimentData.summary.avg_sentiment.toFixed(3);
+                        document.getElementById('totalMentions').textContent = sentimentData.summary.total_mentions;
+                        document.getElementById('maxZScore').textContent = sentimentData.summary.max_z_score.toFixed(2);
+                        document.getElementById('windowSentiment').textContent = sentimentData.summary.window_sentiment.toFixed(3);
+                        document.getElementById('summaryStats').style.display = 'block';
+                    }
+                } else {
+                    console.log('No sentiment data available');
+                }
+            })
+            .catch(error => {
+                console.error('Error loading chart:', error);
+                document.getElementById('modalLoading').style.display = 'none';
+                alert('Error loading chart data');
+            });
+        }
+    </script>
+</body>
+</html>
