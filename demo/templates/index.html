@@ -247,7 +247,7 @@
                         <div id="summaryStats" class="mt-4" style="display: none;">
                             <h6 class="text-muted mb-3">Summary Statistics (30 Days)</h6>
                             <div class="row">
-                                <div class="col-md-3">
+                                <div class="col-md-4">
                                     <div class="card border-0 bg-light">
                                         <div class="card-body text-center p-3">
                                             <small class="text-muted d-block">Avg Sentiment</small>
@@ -255,7 +255,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="col-md-3">
+                                <div class="col-md-4">
                                     <div class="card border-0 bg-light">
                                         <div class="card-body text-center p-3">
                                             <small class="text-muted d-block">Total Mentions</small>
@@ -263,15 +263,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="col-md-3">
-                                    <div class="card border-0 bg-light">
-                                        <div class="card-body text-center p-3">
-                                            <small class="text-muted d-block">Max Z-Score</small>
-                                            <h5 class="mb-0" id="maxZScore">-</h5>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-3">
+                                <div class="col-md-4">
                                     <div class="card border-0 bg-light">
                                         <div class="card-body text-center p-3">
                                             <small class="text-muted d-block">Window Sentiment</small>
@@ -400,7 +392,9 @@
                     if (sentimentData.summary) {
                         document.getElementById('avgSentiment').textContent = sentimentData.summary.avg_sentiment.toFixed(3);
                         document.getElementById('totalMentions').textContent = sentimentData.summary.total_mentions;
-                        document.getElementById('maxZScore').textContent = sentimentData.summary.max_z_score.toFixed(2);
+
+                        // Display price change with color
+
                         document.getElementById('windowSentiment').textContent = sentimentData.summary.window_sentiment.toFixed(3);
                         document.getElementById('summaryStats').style.display = 'block';
                     }
