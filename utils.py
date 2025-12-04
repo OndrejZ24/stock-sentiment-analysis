@@ -12,6 +12,7 @@ from io import StringIO
 import logging
 from typing import List, Set, Any, TYPE_CHECKING, TypeAlias
 import yfinance as yf
+from datetime import datetime, timedelta
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -860,3 +861,344 @@ def fetch_historical_prices(ticker, start_date, end_date) -> DataFrameType:
     stock = yf.Ticker(ticker)
     hist = stock.history(start=start_date, end=end_date)
     return hist
+
+
+def check_market_moved_before_date(df: DataFrameType, target_date: str) -> dict:
+    """
+    Determines whether a stock has already made a significant move before a given sentiment-spike date.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        DataFrame with columns: Open, High, Low, Close, Volume (indexed by date)
+    target_date : str
+        The sentiment-spike date to check (format: 'YYYY-MM-DD')
+    
+    Returns:
+    --------
+    dict : Dictionary containing all intermediate signals and the final market_moved_flag,
+           or None if calculation cannot be performed
+    """
+    if not PANDAS_AVAILABLE or not NUMPY_AVAILABLE:
+        raise ImportError("pandas and numpy are required for this function")
+    
+    try:
+        # Handle multi-level columns if present
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.copy()
+            df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+        
+        # Make a copy to avoid modifying original
+        df = df.copy()
+        
+        # Ensure df has a datetime index
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+        
+        # Normalize the index to remove timezone info for easier comparison
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        
+        # Also normalize to date only (remove time component)
+        df.index = df.index.normalize()
+        
+        # Convert target_date to datetime (timezone-naive)
+        target_dt = pd.to_datetime(target_date).normalize()
+        
+        # Check if target_date exists in the dataframe
+        if target_dt not in df.index:
+            return None
+        
+        # Get data up to and including target_date
+        df_until_target = df[df.index <= target_dt].copy()
+        
+        # Check minimum required history (need at least 20 days for rolling stats)
+        if len(df_until_target) < 20:
+            return None
+        
+        # 1. Calculate daily returns
+        df_until_target['returns'] = df_until_target['Close'].pct_change()
+        
+        # 2. Compute 3-day percentage price change (t-3 to t) with z-score normalization
+        if len(df_until_target) < 3:
+            return None
+        close_t = df_until_target.loc[target_dt, 'Close']
+        close_t_minus_3 = df_until_target['Close'].iloc[-4] if len(df_until_target) >= 4 else np.nan
+        pct_change_3d = ((close_t - close_t_minus_3) / close_t_minus_3) * 100 if not pd.isna(close_t_minus_3) else np.nan
+        
+        # Compute rolling 3-day % change series for z-score (normalized against stock's own volatility)
+        df_until_target['pct_change_3d_series'] = df_until_target['Close'].pct_change(periods=3) * 100
+        pct_3d_rolling_mean = df_until_target['pct_change_3d_series'].rolling(window=20, min_periods=20).mean()
+        pct_3d_rolling_std = df_until_target['pct_change_3d_series'].rolling(window=20, min_periods=20).std()
+        df_until_target['pct_3d_z'] = (df_until_target['pct_change_3d_series'] - pct_3d_rolling_mean) / pct_3d_rolling_std
+        pct_3d_z = df_until_target.loc[target_dt, 'pct_3d_z']
+        
+        # 3. Compute abnormal return z-score (20-day rolling)
+        rolling_mean = df_until_target['returns'].rolling(window=20, min_periods=20).mean()
+        rolling_std = df_until_target['returns'].rolling(window=20, min_periods=20).std()
+        df_until_target['ret_z'] = (df_until_target['returns'] - rolling_mean) / rolling_std
+        ret_z = df_until_target.loc[target_dt, 'ret_z']
+        
+        # 4. Compute volatility expansion (3-day vs 20-day std) as a rolling series
+        df_until_target['std_3d'] = df_until_target['returns'].rolling(window=3).std()
+        df_until_target['std_20d'] = df_until_target['returns'].rolling(window=20).std()
+        df_until_target['vol_expansion'] = df_until_target['std_3d'] / df_until_target['std_20d']
+        vol_expansion = df_until_target.loc[target_dt, 'vol_expansion']
+        
+        # 5. Compute abnormal volume z-score (20-day rolling)
+        vol_rolling_mean = df_until_target['Volume'].rolling(window=20, min_periods=20).mean()
+        vol_rolling_std = df_until_target['Volume'].rolling(window=20, min_periods=20).std()
+        df_until_target['vol_z'] = (df_until_target['Volume'] - vol_rolling_mean) / vol_rolling_std
+        vol_z = df_until_target.loc[target_dt, 'vol_z']
+        
+        # 6. Compute ATR-14 using True Range
+        df_until_target['prev_close'] = df_until_target['Close'].shift(1)
+        hl = df_until_target['High'] - df_until_target['Low']
+        hc = (df_until_target['High'] - df_until_target['prev_close']).abs()
+        lc = (df_until_target['Low'] - df_until_target['prev_close']).abs()
+        df_until_target['tr'] = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+        df_until_target['atr_14'] = df_until_target['tr'].rolling(window=14, min_periods=14).mean()
+        atr_14 = df_until_target.loc[target_dt, 'atr_14']
+        
+        # 7. Compute ATR-based move (3-day absolute price move / ATR-14) as a rolling series
+        df_until_target['abs_3d_move'] = df_until_target['Close'].diff(periods=3).abs()
+        df_until_target['atr_move'] = df_until_target['abs_3d_move'] / df_until_target['atr_14']
+        atr_move = df_until_target.loc[target_dt, 'atr_move']
+        
+        # 8. Combine signals into market_moved_flag
+        # Check last 5 trading days (same as visualization logic)
+        recent_days = 5
+        df_recent = df_until_target.tail(recent_days)
+        
+        market_moved_flag = False
+        
+        # Check if ANY of the last 5 days triggered any threshold
+        # OPTIMIZED FOR SHARPE RATIO (grid search results)
+        # Z_THRESHOLD = 2.0, VOL_EXPANSION = 1.75, ATR_MOVE = 2.0
+        if (df_recent['pct_3d_z'].abs() >= 2.0).any():
+            market_moved_flag = True
+        if (df_recent['ret_z'].abs() >= 2.0).any():
+            market_moved_flag = True
+        if (df_recent['vol_z'].abs() >= 2.0).any():
+            market_moved_flag = True
+        if (df_recent['vol_expansion'] >= 1.75).any():
+            market_moved_flag = True
+        if (df_recent['atr_move'] >= 2.0).any():
+            market_moved_flag = True
+        
+        # 9. Return all intermediate values and final flag
+        return {
+            'target_date': target_date,
+            'pct_change_3d': round(float(pct_change_3d), 2) if not pd.isna(pct_change_3d) else None,
+            'pct_3d_z': round(float(pct_3d_z), 2) if not pd.isna(pct_3d_z) else None,
+            'ret_z': round(float(ret_z), 2) if not pd.isna(ret_z) else None,
+            'vol_z': round(float(vol_z), 2) if not pd.isna(vol_z) else None,
+            'vol_expansion': round(float(vol_expansion), 2) if not pd.isna(vol_expansion) else None,
+            'atr_14': round(float(atr_14), 2) if not pd.isna(atr_14) else None,
+            'atr_move': round(float(atr_move), 2) if not pd.isna(atr_move) else None,
+            'market_moved_flag': market_moved_flag
+        }
+        
+    except Exception as e:
+        print(f"Error in check_market_moved_before_date: {str(e)}")
+        return None
+
+
+def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: str = "Stock", window_days: int = 40):
+    """
+    Visualizes the market move analysis - compact PowerPoint-friendly layout.
+    Only highlights triggers from the last 5 trading days.
+    Uses z-score normalization for 3-day % change to adapt to stock volatility.
+    """
+    if not PANDAS_AVAILABLE or not NUMPY_AVAILABLE:
+        raise ImportError("pandas and numpy are required for this function")
+    
+    # Import matplotlib here to avoid loading it if not needed
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    
+    # Prepare data
+    df_plot = df.copy()
+    if isinstance(df_plot.columns, pd.MultiIndex):
+        df_plot.columns = [col[0] if isinstance(col, tuple) else col for col in df_plot.columns]
+    if not isinstance(df_plot.index, pd.DatetimeIndex):
+        df_plot.index = pd.to_datetime(df_plot.index)
+    if df_plot.index.tz is not None:
+        df_plot.index = df_plot.index.tz_localize(None)
+    df_plot.index = df_plot.index.normalize()
+    target_dt = pd.to_datetime(target_date).normalize()
+    
+    # Get window
+    target_idx = df_plot.index.get_loc(target_dt)
+    start_idx = max(0, target_idx - window_days + 1)
+    df_window = df_plot.iloc[start_idx:target_idx + 1].copy()
+    num_days = len(df_window)
+    
+    # Calculate metrics
+    df_window['returns'] = df_window['Close'].pct_change()
+    df_window['rolling_mean'] = df_window['returns'].rolling(window=20, min_periods=20).mean()
+    df_window['rolling_std'] = df_window['returns'].rolling(window=20, min_periods=20).std()
+    df_window['ret_z'] = (df_window['returns'] - df_window['rolling_mean']) / df_window['rolling_std']
+    df_window['vol_rolling_mean'] = df_window['Volume'].rolling(window=20, min_periods=20).mean()
+    df_window['vol_rolling_std'] = df_window['Volume'].rolling(window=20, min_periods=20).std()
+    df_window['vol_z'] = (df_window['Volume'] - df_window['vol_rolling_mean']) / df_window['vol_rolling_std']
+    df_window['prev_close'] = df_window['Close'].shift(1)
+    hl = df_window['High'] - df_window['Low']
+    hc = (df_window['High'] - df_window['prev_close']).abs()
+    lc = (df_window['Low'] - df_window['prev_close']).abs()
+    df_window['tr'] = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    df_window['atr_14'] = df_window['tr'].rolling(window=14, min_periods=14).mean()
+    df_window['pct_change_3d'] = df_window['Close'].pct_change(periods=3) * 100
+    # Compute 3-day % change z-score (normalized against rolling history)
+    pct_3d_rolling_mean = df_window['pct_change_3d'].rolling(window=20, min_periods=20).mean()
+    pct_3d_rolling_std = df_window['pct_change_3d'].rolling(window=20, min_periods=20).std()
+    df_window['pct_3d_z'] = (df_window['pct_change_3d'] - pct_3d_rolling_mean) / pct_3d_rolling_std
+    df_window['abs_3d_move'] = df_window['Close'].diff(periods=3).abs()
+    df_window['atr_move'] = df_window['abs_3d_move'] / df_window['atr_14']
+    df_window['std_3d'] = df_window['returns'].rolling(window=3).std()
+    df_window['std_20d'] = df_window['returns'].rolling(window=20).std()
+    df_window['vol_expansion'] = df_window['std_3d'] / df_window['std_20d']
+    
+    # Recent window for highlighting (last 5 days)
+    recent_days = 5
+    df_recent = df_window.tail(recent_days)
+    recent_dates = set(df_recent.index)
+    
+    triggered_recent = {
+        'pct_3d_z': df_recent[df_recent['pct_3d_z'].abs() >= 2]['pct_3d_z'],
+        'ret_z': df_recent[df_recent['ret_z'].abs() >= 2]['ret_z'],
+        'vol_z': df_recent[df_recent['vol_z'].abs() >= 2]['vol_z'],
+        'vol_expansion': df_recent[df_recent['vol_expansion'] >= 1.75]['vol_expansion'],
+        'atr_move': df_recent[df_recent['atr_move'] >= 2.0]['atr_move']
+    }
+    any_triggered = any(len(v) > 0 for v in triggered_recent.values())
+    
+    # COMPACT LAYOUT: 2x3 grid (PowerPoint friendly)
+    fig = plt.figure(figsize=(12, 8))
+    gs = fig.add_gridspec(2, 3, hspace=0.35, wspace=0.3)
+    
+    # Colors (original scheme)
+    c_price = '#2C3E50'
+    c_pct = '#E67E22'
+    c_thresh = '#FF6B6B'
+    c_normal = '#4ECDC4'
+    c_volume = '#9B59B6'
+    c_triggered = '#FF6B6B'
+    
+    def format_ax(ax, title):
+        ax.set_title(title, fontsize=9, fontweight='bold')
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+        ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MO, interval=2))
+        # Shade recent period
+        if len(df_recent) > 0:
+            ax.axvspan(df_recent.index[0], df_recent.index[-1], alpha=0.15, color='#FFD700', zorder=0)
+    
+    # 1. PRICE CHART with dual y-axis (top-left, spans 2 columns)
+    ax1 = fig.add_subplot(gs[0, :2])
+    ax1.plot(df_window.index, df_window['Close'], color=c_price, linewidth=1.5, label=f'{ticker} Price')
+    ax1.axvline(x=target_dt, color='red', linestyle='--', linewidth=1.5, alpha=0.8, label='Target Date')
+    ax1.set_ylabel('Price ($)', fontsize=8, color=c_price)
+    ax1.tick_params(axis='y', labelcolor=c_price)
+    format_ax(ax1, f'{ticker} Price & 3d% Z-Score')
+    
+    # Secondary y-axis for 3-day % change Z-score (normalized)
+    ax1b = ax1.twinx()
+    ax1b.plot(df_window.index, df_window['pct_3d_z'], color=c_pct, linewidth=1.2, alpha=0.8, label='3d% Z-Score')
+    ax1b.axhline(y=2, color=c_thresh, linestyle=':', linewidth=1.2, alpha=0.8, label='Threshold (±2σ)')
+    ax1b.axhline(y=-2, color=c_thresh, linestyle=':', linewidth=1.2, alpha=0.8)
+    ax1b.axhline(y=0, color='gray', linestyle='-', linewidth=0.5, alpha=0.5)
+    ax1b.set_ylabel('3d% Z-Score', fontsize=8, color=c_pct)
+    ax1b.tick_params(axis='y', labelcolor=c_pct, labelsize=7)
+    # Adjust y-limits
+    pct_range = max(abs(df_window['pct_3d_z'].min()), abs(df_window['pct_3d_z'].max()), 3) * 1.2
+    ax1b.set_ylim(-pct_range, pct_range)
+    # Combined legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1b.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=7, framealpha=0.9)
+    
+    # 2. VOLATILITY EXPANSION (top-right)
+    ax2 = fig.add_subplot(gs[0, 2])
+    ax2.plot(df_window.index, df_window['vol_expansion'], color=c_price, linewidth=1.2, marker='o', markersize=2, label='Vol Expansion')
+    ax2.axhline(y=1.75, color=c_thresh, linestyle='--', linewidth=1, alpha=0.7, label='Threshold (1.75)')
+    ax2.axhline(y=1, color='gray', linestyle=':', linewidth=1, alpha=0.5, label='Baseline (1.0)')
+    # Highlight ONLY recent triggers
+    recent_vol_exp_triggered = df_recent[df_recent['vol_expansion'] >= 1.75]
+    if len(recent_vol_exp_triggered) > 0:
+        ax2.scatter(recent_vol_exp_triggered.index, recent_vol_exp_triggered['vol_expansion'], 
+                   color=c_triggered, s=50, zorder=5, edgecolors='white', linewidths=0.5, label='Triggered')
+    ax2.set_ylabel('Ratio', fontsize=8)
+    ax2.set_ylim(bottom=0)
+    ax2.legend(loc='upper left', fontsize=6, framealpha=0.9)
+    format_ax(ax2, 'Volatility Expansion (≥1.75)')
+    
+    # 3. RETURN Z-SCORE (bottom-left)
+    ax3 = fig.add_subplot(gs[1, 0])
+    colors_rz = [c_triggered if (idx in recent_dates and pd.notna(v) and abs(v) >= 2) 
+                 else c_normal for idx, v in zip(df_window.index, df_window['ret_z'])]
+    ax3.bar(df_window.index, df_window['ret_z'], width=0.8, color=colors_rz, alpha=0.7, label='Return Z')
+    ax3.axhline(y=2, color=c_thresh, linestyle='--', linewidth=1, alpha=0.7, label='Threshold (±2)')
+    ax3.axhline(y=-2, color=c_thresh, linestyle='--', linewidth=1, alpha=0.7)
+    ax3.axhline(y=0, color='gray', linestyle='-', linewidth=0.5, alpha=0.5)
+    ax3.set_ylabel('Z-Score', fontsize=8)
+    ax3.legend(loc='upper left', fontsize=6, framealpha=0.9)
+    format_ax(ax3, 'Return Z-Score (±2)')
+    
+    # 4. VOLUME Z-SCORE (bottom-center)
+    ax4 = fig.add_subplot(gs[1, 1])
+    colors_vz = [c_triggered if (idx in recent_dates and pd.notna(v) and abs(v) >= 2) 
+                 else c_volume for idx, v in zip(df_window.index, df_window['vol_z'])]
+    ax4.bar(df_window.index, df_window['vol_z'], width=0.8, color=colors_vz, alpha=0.7, label='Volume Z')
+    ax4.axhline(y=2, color=c_thresh, linestyle='--', linewidth=1, alpha=0.7, label='Threshold (±2)')
+    ax4.axhline(y=-2, color=c_thresh, linestyle='--', linewidth=1, alpha=0.7)
+    ax4.axhline(y=0, color='gray', linestyle='-', linewidth=0.5, alpha=0.5)
+    ax4.set_ylabel('Z-Score', fontsize=8)
+    ax4.legend(loc='upper left', fontsize=6, framealpha=0.9)
+    format_ax(ax4, 'Volume Z-Score (±2)')
+    
+    # 5. ATR MOVE (bottom-right)
+    ax5 = fig.add_subplot(gs[1, 2])
+    ax5.plot(df_window.index, df_window['atr_move'], color=c_price, linewidth=1.2, marker='o', markersize=2, label='ATR Move')
+    ax5.axhline(y=2.0, color=c_thresh, linestyle='--', linewidth=1, alpha=0.7, label='Threshold (2.0)')
+    # Highlight ONLY recent triggers
+    recent_atr_triggered = df_recent[df_recent['atr_move'] >= 2.0]
+    if len(recent_atr_triggered) > 0:
+        ax5.scatter(recent_atr_triggered.index, recent_atr_triggered['atr_move'], 
+                   color=c_triggered, s=50, zorder=5, edgecolors='white', linewidths=0.5, label='Triggered')
+    ax5.set_ylabel('ATR Multiple', fontsize=8)
+    ax5.set_ylim(bottom=0)
+    ax5.legend(loc='upper left', fontsize=6, framealpha=0.9)
+    format_ax(ax5, 'ATR Move (≥2.0)')
+    
+    # SUMMARY BOX - in the title area
+    if any_triggered:      
+        status = "Market moved"
+        status_color = '#FFCCCC'
+    else:
+        status = "No recent move"
+        status_color = '#90EE90'
+    
+    fig.suptitle(f'{ticker} Market Analysis  •  Target: {target_date}  •  {status}', 
+                 fontsize=11, fontweight='bold', y=0.98,
+                 bbox=dict(boxstyle='round,pad=0.3', facecolor=status_color, alpha=0.8))
+    
+    # Legend for recent period
+    fig.text(0.99, 0.01, f'Yellow = Last {recent_days} days (trigger window)', 
+             fontsize=7, ha='right', va='bottom', style='italic', color='#666')
+    
+    plt.subplots_adjust(left=0, right=1, top=0.90, bottom=0.08, hspace=0.35, wspace=0.55)
+    plt.show()
+    
+    return check_market_moved_before_date(df, target_date)
+
+def adjust_to_trading_day(date_str):
+    """Adjust weekend dates to the previous Friday."""
+    dt = pd.to_datetime(date_str)
+    # Saturday = 5, Sunday = 6
+    if dt.weekday() == 5:  # Saturday -> Friday
+        dt = dt - timedelta(days=1)
+    elif dt.weekday() == 6:  # Sunday -> Friday
+        dt = dt - timedelta(days=2)
+    return dt.strftime('%Y-%m-%d')
