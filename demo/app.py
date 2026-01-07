@@ -5,10 +5,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 import time
-import yfinance as yf
-from requests import Session
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import requests
 
 # Add parent directory to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,28 +14,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import get_oracle_connection
 
 app = Flask(__name__)
-
-# Create a persistent session with retry logic for yfinance
-def get_yfinance_session():
-    """Create a session with retry strategy and proper headers."""
-    session = Session()
-    retries = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"]
-    )
-    session.mount('http://', HTTPAdapter(max_retries=retries))
-    session.mount('https://', HTTPAdapter(max_retries=retries))
-
-    # Set user agent to avoid blocking
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    })
-    return session
-
-# Global session for all yfinance requests
-yf_session = get_yfinance_session()
 
 def get_available_dates():
     """Get list of unique dates available in FILTERED_SIGNALS table."""
@@ -174,60 +149,87 @@ def get_sentiment_history(ticker, end_date, days=30):
 
 def get_stock_prices(ticker, end_date, days=30):
     """
-    Get stock price history from Yahoo Finance.
-    ROBUST FIX: No mock data fallback - only real data is used.
+    Get stock price history from Yahoo Finance using direct API calls.
+    This bypasses yfinance library to avoid rate limiting issues.
     """
+    import requests
+    import json
+
     try:
         end_dt = datetime.strptime(end_date, '%Y-%m-%d')
         start_dt = end_dt - timedelta(days=days)
-        end_dt_fetch = end_dt + timedelta(days=1)
 
-        print(f"Fetching REAL stock data for {ticker} from {start_dt.strftime('%Y-%m-%d')} to {end_date}")
+        # Convert to Unix timestamps
+        period1 = int(start_dt.timestamp())
+        period2 = int(end_dt.timestamp())
 
-        # Method 1: Try yfinance with custom session
-        try:
-            print(f"  Attempting yfinance with custom session...")
-            time.sleep(0.5)  # Rate limiting delay
+        print(f"Fetching stock data for {ticker} from {start_dt.strftime('%Y-%m-%d')} to {end_date}")
 
-            stock = yf.Ticker(ticker, session=yf_session)
-            hist = stock.history(
-                start=start_dt,
-                end=end_dt_fetch,
-                interval="1d",
-                auto_adjust=True,
-                timeout=10
-            )
+        # Add a small delay to avoid rate limiting
+        time.sleep(1)
 
-            if not hist.empty:
-                print(f"  ✓ SUCCESS: Fetched {len(hist)} REAL price records from Yahoo Finance")
-                print(f"    Price range: ${hist['Close'].min():.2f} - ${hist['Close'].max():.2f}")
-                return hist
+        # Yahoo Finance v8 API endpoint - try query2 as alternative
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {
+            'period1': period1,
+            'period2': period2,
+            'interval': '1d',
+            'includePrePost': 'false',
+            'events': 'div,splits'
+        }
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+
+        # Direct API call with timeout
+        print(f"  Making direct API call to Yahoo Finance...")
+        response = requests.get(url, params=params, headers=headers, timeout=15)
+
+        if response.status_code == 200:
+            data = response.json()
+
+            # Extract price data from API response
+            result = data.get('chart', {}).get('result', [])
+            if result:
+                quote = result[0]
+                timestamps = quote.get('timestamp', [])
+                indicators = quote.get('indicators', {}).get('quote', [{}])[0]
+
+                # Build DataFrame
+                df = pd.DataFrame({
+                    'Date': pd.to_datetime(timestamps, unit='s'),
+                    'Open': indicators.get('open', []),
+                    'High': indicators.get('high', []),
+                    'Low': indicators.get('low', []),
+                    'Close': indicators.get('close', []),
+                    'Volume': indicators.get('volume', [])
+                })
+
+                # Remove rows with missing data
+                df = df.dropna(subset=['Close'])
+                df = df.set_index('Date')
+
+                if not df.empty:
+                    print(f"  ✓ SUCCESS: Fetched {len(df)} price records")
+                    print(f"    Price range: ${df['Close'].min():.2f} - ${df['Close'].max():.2f}")
+                    return df
+                else:
+                    print(f"  ✗ No valid price data found")
             else:
-                print(f"  ✗ yfinance returned empty data")
-        except Exception as e:
-            print(f"  ✗ yfinance failed: {e}")
+                print(f"  ✗ Empty result from API")
+        elif response.status_code == 429:
+            print(f"  ✗ Rate limited (429) - too many requests. Try again in a few minutes.")
+        else:
+            print(f"  ✗ API returned status code {response.status_code}")
+            print(f"    Response: {response.text[:200]}")
 
-        # Method 2: Try pandas_datareader (if available)
-        try:
-            import pandas_datareader as pdr
-            print(f"  Attempting pandas_datareader...")
-            time.sleep(0.5)
-
-            hist = pdr.get_data_yahoo(ticker, start=start_dt, end=end_dt_fetch)
-
-            if not hist.empty:
-                print(f"  ✓ SUCCESS: Fetched {len(hist)} REAL price records from pandas_datareader")
-                return hist
-            else:
-                print(f"  ✗ pandas_datareader returned empty data")
-        except ImportError:
-            print(f"  ⓘ pandas_datareader not installed, skipping...")
-        except Exception as e:
-            print(f"  ✗ pandas_datareader failed: {e}")
-
-        # ROBUST FIX: No mock data fallback - return empty DataFrame if no real data available
-        print(f"  ✗ WARNING: All real data methods failed for {ticker}")
-        print(f"    Returning empty DataFrame - chart will show 'No data available'")
+        print(f"  ✗ WARNING: Could not fetch data for {ticker}")
         return pd.DataFrame()
 
     except Exception as e:
@@ -237,7 +239,10 @@ def get_stock_prices(ticker, end_date, days=30):
         return pd.DataFrame()
 
 def create_sentiment_chart(ticker, end_date):
-    """Create a Plotly sentiment chart with sentiment metrics only."""
+    """
+    Create sentiment chart with mentions bars and sentiment lines (dual y-axis).
+    Matches the original design.
+    """
     import plotly.graph_objs as go
     from plotly.subplots import make_subplots
     import plotly
@@ -247,97 +252,91 @@ def create_sentiment_chart(ticker, end_date):
     if df.empty:
         return None
 
-    # Create figure with single chart
-    fig = go.Figure()
+    # Sort by date
+    df = df.sort_values('date')
 
-    # Main chart - Sentiment Score with gradient fill
-    fig.add_trace(
-        go.Scatter(
-            x=df['date'],
-            y=df['sentiment_mean'],
-            mode='lines+markers',
-            name='Sentiment Mean',
-            line=dict(color='#667eea', width=3, shape='spline'),
-            marker=dict(size=8, color='#667eea', line=dict(color='white', width=2)),
-            fill='tozeroy',
-            fillcolor='rgba(102, 126, 234, 0.1)',
-            legendgroup='sentiment',
-            showlegend=True,
-            yaxis='y1'
-        )
-    )
+    # Create figure with secondary y-axis
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # Add window sentiment line
-    fig.add_trace(
-        go.Scatter(
-            x=df['date'],
-            y=df['window_sentiment'],
-            mode='lines',
-            name='Window Sentiment',
-            line=dict(color='#9f7aea', width=2, dash='dot'),
-            legendgroup='sentiment',
-            showlegend=True,
-            yaxis='y1'
-        )
-    )
-
-    # Add mentions as bar chart on secondary y-axis
+    # 1. Reddit Mentions bars (background, on secondary y-axis)
     fig.add_trace(
         go.Bar(
             x=df['date'],
             y=df['mentions'],
             name='Reddit Mentions',
-            marker=dict(color='rgba(255, 140, 0, 0.4)'),
-            legendgroup='mentions',
-            showlegend=True,
+            marker=dict(color='rgba(255, 167, 38, 0.5)'),
+            hovertemplate='<b>%{x|%b %d}</b><br>Mentions: %{y}<extra></extra>',
             yaxis='y2'
-        )
+        ),
+        secondary_y=True
     )
 
-    # Update layout with dual y-axes
+    # 2. Sentiment Mean line (solid blue)
+    fig.add_trace(
+        go.Scatter(
+            x=df['date'],
+            y=df['sentiment_mean'],
+            mode='lines',
+            name='Sentiment Mean',
+            line=dict(color='#2196F3', width=2),
+            hovertemplate='<b>%{x|%b %d}</b><br>Sentiment: %{y:.3f}<extra></extra>'
+        ),
+        secondary_y=False
+    )
+
+    # 3. Window Sentiment line (dotted, where available)
+    signal_days = df[df['window_sentiment'].notna()].copy()
+    if not signal_days.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=signal_days['date'],
+                y=signal_days['window_sentiment'],
+                mode='lines',
+                name='Window Sentiment',
+                line=dict(color='#90CAF9', width=2, dash='dot'),
+                hovertemplate='<b>%{x|%b %d}</b><br>Window: %{y:.3f}<extra></extra>'
+            ),
+            secondary_y=False
+        )
+
+    # Add zero line
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5, secondary_y=False)
+
+    # Update layout
     fig.update_layout(
-        title=dict(
-            text=f'<b>{ticker}</b> - Sentiment Analysis (30 Days)',
-            x=0.5,
-            xanchor='center',
-            font=dict(size=20, color='#333')
-        ),
-        xaxis=dict(
-            title='Date',
-            showgrid=True,
-            gridcolor='#e0e0e0',
-            linecolor='#ccc'
-        ),
-        yaxis=dict(
-            title='Sentiment Score',
-            titlefont=dict(color='#667eea', size=12),
-            tickfont=dict(color='#667eea'),
-            showgrid=True,
-            gridcolor='#e0e0e0',
-            zeroline=True,
-            zerolinecolor='#999'
-        ),
-        yaxis2=dict(
-            title='Reddit Mentions',
-            titlefont=dict(color='#ff8c00', size=12),
-            tickfont=dict(color='#ff8c00'),
-            overlaying='y',
-            side='right',
-            showgrid=False
-        ),
+        title=f'{ticker} - Sentiment Analysis (30 Days)',
+        height=350,
         hovermode='x unified',
         plot_bgcolor='white',
-        paper_bgcolor='white',
-        font=dict(color='#333'),
-        height=500,
-        margin=dict(l=60, r=60, t=80, b=60),
         legend=dict(
             orientation='h',
-            yanchor='bottom',
-            y=1.02,
+            yanchor='top',
+            y=1.15,
             xanchor='left',
             x=0
-        )
+        ),
+        margin=dict(t=60, b=30, l=60, r=60)
+    )
+
+    # Update x-axis
+    fig.update_xaxes(
+        title_text='Date',
+        showgrid=True,
+        gridcolor='rgba(200,200,200,0.3)'
+    )
+
+    # Update y-axes
+    fig.update_yaxes(
+        title_text='Sentiment Score',
+        showgrid=True,
+        gridcolor='rgba(200,200,200,0.3)',
+        zeroline=True,
+        secondary_y=False
+    )
+    fig.update_yaxes(
+        title_text='Reddit Mentions',
+        showgrid=False,
+        secondary_y=True
     )
 
     return plotly.io.to_json(fig)
@@ -413,8 +412,13 @@ def sentiment_chart(ticker, date):
         summary = {
             'avg_sentiment': round(df['sentiment_mean'].mean(), 3),
             'total_mentions': int(df['mentions'].sum()),
-            'window_sentiment': round(df['window_sentiment'].mean(), 3) if not df['window_sentiment'].isna().all() else 0.0,
-            'sentiment_volatility': round(df['sentiment_mean'].std(), 3) if len(df) > 1 else 0.0
+            'window_sentiment': round(df['window_sentiment'].mean(), 3) if not df['window_sentiment'].isna().all() else None,
+            'sentiment_volatility': round(df['sentiment_mean'].std(), 3) if len(df) > 1 else 0.0,
+            'total_days': len(df),
+            'signal_days': int(df['z_score'].notna().sum()) if 'z_score' in df.columns else 0,
+            'buy_signals': int(((df.get('z_score', 0) > 0) & df.get('z_score', pd.Series()).notna()).sum()),
+            'sell_signals': int(((df.get('z_score', 0) < 0) & df.get('z_score', pd.Series()).notna()).sum()),
+            'avg_z_score': round(df['z_score'].mean(), 2) if 'z_score' in df.columns and not df['z_score'].isna().all() else None
         }
 
         return jsonify({
@@ -423,6 +427,180 @@ def sentiment_chart(ticker, date):
             'summary': summary
         })
     except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+def create_price_chart(ticker, end_date):
+    """Create stock price chart with candlestick-style visualization."""
+    import plotly.graph_objs as go
+    from plotly.subplots import make_subplots
+    import plotly
+
+    df = get_stock_prices(ticker, end_date, days=30)
+
+    if df.empty:
+        return None
+
+    df = df.reset_index()
+    date_col = 'Date' if 'Date' in df.columns else 'index'
+    df[date_col] = pd.to_datetime(df[date_col])
+
+    close_col = 'Close'
+    volume_col = 'Volume'
+
+    df['pct_change'] = df[close_col].pct_change() * 100
+    df['ma_3'] = df[close_col].rolling(window=3).mean()
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.7, 0.3],
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        subplot_titles=('', '')
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=df[date_col],
+            y=df[close_col],
+            mode='lines',
+            name='Close Price',
+            line=dict(color='#2196F3', width=2),
+            hovertemplate='<b>%{x|%b %d}</b><br>Close: $%{y:.2f}<extra></extra>'
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=df[date_col],
+            y=df['ma_3'],
+            mode='lines',
+            name='3-Day Avg',
+            line=dict(color='#FF6B6B', width=1.5, dash='dot'),
+            hovertemplate='<b>%{x|%b %d}</b><br>3D Avg: $%{y:.2f}<extra></extra>'
+        ),
+        row=1, col=1
+    )
+
+    colors = ['#26a69a' if val >= 0 else '#ef5350' for val in df['pct_change'].fillna(0)]
+    fig.add_trace(
+        go.Bar(
+            x=df[date_col],
+            y=df[volume_col],
+            name='Volume',
+            marker=dict(color=colors, opacity=0.3),
+            hovertemplate='<b>%{x|%b %d}</b><br>Volume: %{y:,.0f}<extra></extra>'
+        ),
+        row=2, col=1
+    )
+
+    first_price = float(df[close_col].iloc[0])
+    last_price = float(df[close_col].iloc[-1])
+    price_change = ((last_price - first_price) / first_price) * 100
+    change_str = f"+{price_change:.2f}%" if price_change >= 0 else f"{price_change:.2f}%"
+    change_color = '#26a69a' if price_change >= 0 else '#ef5350'
+    title_text = f'<b>{ticker}</b> - Stock Price (30 Days) <span style="color:{change_color}">{change_str}</span>'
+
+    price_min = float(df[close_col].min())
+    price_max = float(df[close_col].max())
+    price_padding = (price_max - price_min) * 0.08
+    y_min = price_min - price_padding
+    y_max = price_max + price_padding
+
+    fig.update_layout(
+        title=dict(
+            text=title_text,
+            x=0.5,
+            xanchor='center',
+            font=dict(size=18, color='#333'),
+            font_family='Arial'
+        ),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        font=dict(color='#333'),
+        height=350,
+        margin=dict(l=60, r=60, t=60, b=30),
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='left',
+            x=0,
+            font=dict(size=10)
+        ),
+        hovermode='x unified',
+        bargap=0.1
+    )
+
+    fig.update_xaxes(showgrid=False, showticklabels=False, row=1, col=1)
+    fig.update_xaxes(
+        title_text='Date',
+        showgrid=False,
+        tickformat='%b %d',
+        row=2, col=1
+    )
+    fig.update_yaxes(
+        title='Price ($)',
+        showgrid=True,
+        gridcolor='rgba(200, 200, 200, 0.3)',
+        tickprefix='$',
+        tickformat='.2f',
+        range=[y_min, y_max],
+        row=1, col=1
+    )
+    fig.update_yaxes(
+        title='',
+        showticklabels=False,
+        showgrid=False,
+        row=2, col=1
+    )
+
+    return plotly.io.to_json(fig)
+
+@app.route('/chart/price/<ticker>/<date>')
+def price_chart(ticker, date):
+    """API endpoint to get stock price chart data from Yahoo Finance."""
+    try:
+        df = get_stock_prices(ticker, date, days=30)
+
+        if df.empty:
+            return jsonify({
+                'success': False,
+                'error': 'No price data available from Yahoo Finance'
+            }), 404
+
+        chart_json = create_price_chart(ticker, date)
+
+        if not chart_json:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to create price chart'
+            }), 500
+
+        df = df.reset_index()
+        date_col = 'Date' if 'Date' in df.columns else 'index'
+        close_col = 'Close'
+
+        first_price = float(df[close_col].iloc[0])
+        last_price = float(df[close_col].iloc[-1])
+        price_change_pct = ((last_price - first_price) / first_price) * 100
+
+        summary = {
+            'current_price': last_price,
+            'price_change_pct': price_change_pct
+        }
+
+        return jsonify({
+            'success': True,
+            'chart': chart_json,
+            'summary': summary
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'success': False,
             'error': str(e)

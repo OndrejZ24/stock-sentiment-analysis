@@ -169,9 +169,8 @@
                             {% endfor %}
                         </select>
                     </div>
-                    <div class="col-md-6 text-end">
-                        <button id="loadSignals" class="btn btn-primary btn-lg">
-                            <i class="bi bi-graph-up-arrow"></i>
+                    <div class="col-md-6">
+                        <button class="btn btn-primary btn-lg w-100 mt-4" onclick="loadSignals()">
                             Show Signals
                         </button>
                     </div>
@@ -241,89 +240,34 @@
                     <div id="modalContent" style="display: none;">
                         <!-- Sentiment Chart -->
                         <div class="chart-container">
-                            <h6 class="text-muted mb-2">📊 Sentiment Analysis</h6>
                             <div id="sentimentChart"></div>
-                            <!-- Sentiment Statistics (under sentiment chart) -->
-                            <div id="sentimentStats" class="mt-3" style="display: none;">
-                                    <div class="row g-3">
-                                        <div class="col-12 col-md-4">
-                                            <div class="card border-0 bg-light h-100">
-                                                <div class="card-body text-center p-3">
-                                                    <small class="text-muted d-block" title="Mean sentiment score (weighted)">Avg Sentiment</small>
-                                                    <h5 class="mb-0" id="avgSentiment">-</h5>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="col-12 col-md-4">
-                                            <div class="card border-0 bg-light h-100">
-                                                <div class="card-body text-center p-3">
-                                                    <small class="text-muted d-block" title="3-day rolling window sentiment">Window Sentiment</small>
-                                                    <h5 class="mb-0" id="windowSentiment">-</h5>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="col-12 col-md-4">
-                                            <div class="card border-0 bg-light h-100">
-                                                <div class="card-body text-center p-3">
-                                                    <small class="text-muted d-block" title="Total number of mentions in period">Total Mentions</small>
-                                                    <h5 class="mb-0" id="totalMentions">-</h5>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="row g-3 mt-2">
-                                        <div class="col-12 col-md-4">
-                                            <div class="card border-0 bg-light h-100">
-                                                <div class="card-body text-center p-3">
-                                                    <small class="text-muted d-block" title="Number of days with data">Data Days</small>
-                                                    <h5 class="mb-0" id="totalDays">-</h5>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="col-12 col-md-4">
-                                            <div class="card border-0 bg-light h-100">
-                                                <div class="card-body text-center p-3">
-                                                    <small class="text-muted d-block" title="Days with BUY or SELL signals">Signal Days</small>
-                                                    <h5 class="mb-0" id="signalDays">-</h5>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="col-12 col-md-4">
-                                            <div class="card border-0 bg-light h-100">
-                                                <div class="card-body text-center p-3">
-                                                    <small class="text-muted d-block" title="Average z-score on signal days">Avg Z-Score</small>
-                                                    <h5 class="mb-0" id="avgZScore">-</h5>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                            </div>
                         </div>
 
-                        <!-- Stock Price Chart -->
-                        <div class="chart-container mt-4">
-                            <h6 class="text-muted mb-2">📈 Stock Price (Yahoo Finance)</h6>
-                            <div id="priceChart" style="min-height: 350px; border: 1px solid #eee;"></div>
-                            <div id="priceChartError" class="alert alert-warning mt-2" style="display: none;">
-                                <small>⚠️ Price data unavailable from Yahoo Finance</small>
-                            </div>
-                            <!-- Price Statistics (under price chart) -->
-                            <div id="priceStats" class="mt-3" style="display: none;">
-                                <div class="row">
-                                    <div class="col-md-6">
-                                        <div class="card border-0 bg-light">
-                                            <div class="card-body text-center p-3">
-                                                <small class="text-muted d-block">Current Price</small>
-                                                <h5 class="mb-0" id="currentPrice">-</h5>
-                                            </div>
+                        <!-- Summary Statistics -->
+                        <div id="summaryStats" class="mt-4" style="display: none;">
+                            <h6 class="text-muted mb-3">Summary Statistics (30 Days)</h6>
+                            <div class="row">
+                                <div class="col-md-4">
+                                    <div class="card border-0 bg-light">
+                                        <div class="card-body text-center p-3">
+                                            <small class="text-muted d-block">Avg Sentiment</small>
+                                            <h5 class="mb-0" id="avgSentiment">-</h5>
                                         </div>
                                     </div>
-                                    <div class="col-md-6">
-                                        <div class="card border-0 bg-light">
-                                            <div class="card-body text-center p-3">
-                                                <small class="text-muted d-block">30D Price Change</small>
-                                                <h5 class="mb-0" id="priceChange">-</h5>
-                                            </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="card border-0 bg-light">
+                                        <div class="card-body text-center p-3">
+                                            <small class="text-muted d-block">Total Mentions</small>
+                                            <h5 class="mb-0" id="totalMentions">-</h5>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="card border-0 bg-light">
+                                        <div class="card-body text-center p-3">
+                                            <small class="text-muted d-block">Window Sentiment</small>
+                                            <h5 class="mb-0" id="windowSentiment">-</h5>
                                         </div>
                                     </div>
                                 </div>
@@ -425,23 +369,17 @@
             const modal = new bootstrap.Modal(document.getElementById('tickerModal'));
 
             // Reset modal
-            document.getElementById('modalTitle').textContent = `${ticker} - Sentiment & Price Analysis`;
+            document.getElementById('modalTitle').textContent = `${ticker} - Sentiment Analysis`;
             document.getElementById('modalLoading').style.display = 'block';
             document.getElementById('modalContent').style.display = 'none';
-            document.getElementById('sentimentStats').style.display = 'none';
-            document.getElementById('priceStats').style.display = 'none';
-            document.getElementById('priceChartError').style.display = 'none';
+            document.getElementById('summaryStats').style.display = 'none';
 
             modal.show();
 
-            // Load both charts in parallel (handle errors individually)
-            Promise.all([
-                fetch(`/chart/sentiment/${ticker}/${date}`)
-                    .then(r => r.ok ? r.json() : { success: false }),
-                fetch(`/chart/price/${ticker}/${date}`)
-                    .then(r => r.ok ? r.json() : { success: false, error: 'No price data available' })
-            ])
-            .then(([sentimentData, priceData]) => {
+            // Load sentiment chart
+            fetch(`/chart/sentiment/${ticker}/${date}`)
+            .then(response => response.json())
+            .then(sentimentData => {
                 document.getElementById('modalLoading').style.display = 'none';
                 document.getElementById('modalContent').style.display = 'block';
 
@@ -450,49 +388,22 @@
                     const sentimentChart = JSON.parse(sentimentData.chart);
                     Plotly.newPlot('sentimentChart', sentimentChart.data, sentimentChart.layout);
 
-                    // Display sentiment summary statistics (under sentiment chart)
+                    // Display summary statistics
                     if (sentimentData.summary) {
-                        const s = sentimentData.summary;
-                        document.getElementById('avgSentiment').textContent = (s.avg_sentiment != null) ? s.avg_sentiment.toFixed(3) : '-';
-                        document.getElementById('windowSentiment').textContent = (s.window_sentiment != null) ? s.window_sentiment.toFixed(3) : '-';
-                        document.getElementById('totalMentions').textContent = s.total_mentions || '-';
-                        document.getElementById('totalDays').textContent = s.total_days || '-';
-                        document.getElementById('signalDays').textContent = `${s.signal_days || 0} (${s.buy_signals || 0}🟢 / ${s.sell_signals || 0}🔴)`;
-                        document.getElementById('avgZScore').textContent = (s.avg_z_score != null) ? s.avg_z_score.toFixed(2) : '-';
-                        document.getElementById('sentimentStats').style.display = 'block';
+                        document.getElementById('avgSentiment').textContent = sentimentData.summary.avg_sentiment.toFixed(3);
+                        document.getElementById('totalMentions').textContent = sentimentData.summary.total_mentions;
+
+                        // Display price change with color
+
+                        document.getElementById('windowSentiment').textContent = sentimentData.summary.window_sentiment.toFixed(3);
+                        document.getElementById('summaryStats').style.display = 'block';
                     }
                 } else {
-                    document.getElementById('sentimentChart').innerHTML = '<div class="alert alert-info">No sentiment data available</div>';
-                }
-
-                // Display price chart
-                console.log('Price data:', priceData);
-                if (priceData.success && priceData.chart) {
-                    console.log('Rendering price chart...');
-                    const priceChart = JSON.parse(priceData.chart);
-                    console.log('Price chart data:', priceChart);
-                    Plotly.newPlot('priceChart', priceChart.data, priceChart.layout);
-                    console.log('Price chart rendered');
-
-                    // Display price summary statistics (under price chart)
-                    if (priceData.summary) {
-                        document.getElementById('currentPrice').textContent = '$' + priceData.summary.current_price.toFixed(2);
-
-                        const changeEl = document.getElementById('priceChange');
-                        const changePct = priceData.summary.price_change_pct;
-                        const changeStr = changePct >= 0 ? `+${changePct.toFixed(2)}%` : `${changePct.toFixed(2)}%`;
-                        changeEl.textContent = changeStr;
-                        changeEl.style.color = changePct >= 0 ? '#26a69a' : '#ef5350';
-                        document.getElementById('priceStats').style.display = 'block';
-                    }
-                } else {
-                    console.log('Price chart failed - showing error');
-                    document.getElementById('priceChart').innerHTML = '';
-                    document.getElementById('priceChartError').style.display = 'block';
+                    console.log('No sentiment data available');
                 }
             })
             .catch(error => {
-                console.error('Error loading charts:', error);
+                console.error('Error loading chart:', error);
                 document.getElementById('modalLoading').style.display = 'none';
                 alert('Error loading chart data');
             });
