@@ -110,7 +110,10 @@ def get_signals_for_date(selected_date):
         return []
 
 def get_sentiment_history(ticker, end_date, days=30):
-    """Get sentiment history for a ticker leading up to the signal date."""
+    """
+    Get daily aggregated sentiment history from SENTIMENT_RESULTS table.
+    Aggregates FINAL_SENTIMENT_SCORE by day for the specified ticker.
+    """
     try:
         conn = get_oracle_connection()
         cursor = conn.cursor()
@@ -119,20 +122,27 @@ def get_sentiment_history(ticker, end_date, days=30):
         end_dt = datetime.strptime(end_date, '%Y-%m-%d')
         start_dt = end_dt - timedelta(days=days)
 
+        # Convert to Unix timestamps (seconds)
+        start_timestamp = int(start_dt.timestamp())
+        end_timestamp = int(end_dt.timestamp()) + 86400  # Add one day
+
         query = """
-            SELECT SIGNAL_DATE, SENTIMENT_MEAN, WINDOW_MENTIONS,
-                   WINDOW_SENTIMENT, Z_SCORE
-            FROM FILTERED_SIGNALS
+            SELECT
+                TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400) as sentiment_date,
+                AVG(FINAL_SENTIMENT_SCORE) as avg_sentiment,
+                COUNT(*) as mention_count,
+                STDDEV(FINAL_SENTIMENT_SCORE) as sentiment_stddev
+            FROM SENTIMENT_RESULTS
             WHERE TICKER = :ticker
-            AND SIGNAL_DATE BETWEEN TO_DATE(:start_date, 'YYYY-MM-DD')
-                                AND TO_DATE(:end_date, 'YYYY-MM-DD')
-            ORDER BY SIGNAL_DATE
+            AND CREATED_UTC BETWEEN :start_ts AND :end_ts
+            GROUP BY TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400)
+            ORDER BY sentiment_date
         """
 
         cursor.execute(query, {
             'ticker': ticker,
-            'start_date': start_dt.strftime('%Y-%m-%d'),
-            'end_date': end_date
+            'start_ts': start_timestamp,
+            'end_ts': end_timestamp
         })
 
         rows = cursor.fetchall()
@@ -142,13 +152,19 @@ def get_sentiment_history(ticker, end_date, days=30):
 
         # Convert to dataframe
         if rows:
-            df = pd.DataFrame(rows, columns=['date', 'sentiment_mean', 'mentions', 'window_sentiment', 'z_score'])
+            df = pd.DataFrame(rows, columns=['date', 'sentiment_mean', 'mentions', 'sentiment_stddev'])
             df['date'] = pd.to_datetime(df['date'])
-            print(f"Fetched {len(df)} sentiment records for {ticker}")
+
+            # Calculate rolling window sentiment (7-day moving average)
+            df['window_sentiment'] = df['sentiment_mean'].rolling(window=min(7, len(df)), min_periods=1).mean()
+
+            print(f"Fetched {len(df)} days of sentiment data for {ticker} from SENTIMENT_RESULTS")
+            print(f"  Date range: {df['date'].min()} to {df['date'].max()}")
+            print(f"  Total mentions: {df['mentions'].sum()}")
             return df
         else:
-            print(f"No sentiment data found for {ticker} between {start_dt.strftime('%Y-%m-%d')} and {end_date}")
-            return pd.DataFrame(columns=['date', 'sentiment_mean', 'mentions', 'window_sentiment', 'z_score'])
+            print(f"No sentiment data found in SENTIMENT_RESULTS for {ticker} between {start_dt.strftime('%Y-%m-%d')} and {end_date}")
+            return pd.DataFrame(columns=['date', 'sentiment_mean', 'mentions', 'window_sentiment'])
 
     except Exception as e:
         print(f"Error getting sentiment history for {ticker}: {e}")
@@ -156,51 +172,10 @@ def get_sentiment_history(ticker, end_date, days=30):
         traceback.print_exc()
         return pd.DataFrame(columns=['date', 'sentiment_mean', 'mentions', 'window_sentiment', 'z_score'])
 
-def generate_mock_stock_data(ticker, start_date, end_date, base_price=150):
-    """
-    Generate realistic mock stock data for demonstration purposes.
-    Used when Yahoo Finance API is unavailable due to rate limiting.
-    """
-    dates = pd.date_range(start=start_date, end=end_date, freq='D')
-    # Filter to weekdays only (trading days)
-    dates = dates[dates.dayofweek < 5]
-
-    n = len(dates)
-    if n == 0:
-        return pd.DataFrame()
-
-    # Set seed based on ticker for consistent data per ticker
-    np.random.seed(sum(ord(c) for c in ticker))
-
-    # Generate realistic price movement with slight upward bias
-    returns = np.random.normal(0.002, 0.02, n)  # 0.2% daily drift, 2% volatility
-    price = base_price * (1 + returns).cumprod()
-
-    # Create OHLC data with realistic intraday variation
-    high = price * (1 + np.abs(np.random.normal(0, 0.015, n)))
-    low = price * (1 - np.abs(np.random.normal(0, 0.015, n)))
-    open_price = np.roll(price, 1)
-    open_price[0] = base_price
-
-    # Generate volume with some variation
-    base_volume = 5000000
-    volume = base_volume + np.random.randint(-2000000, 3000000, n)
-    volume = np.maximum(volume, 1000000)  # Ensure positive volume
-
-    data = pd.DataFrame({
-        'Open': open_price,
-        'High': high,
-        'Low': low,
-        'Close': price,
-        'Volume': volume
-    }, index=dates)
-
-    return data
-
 def get_stock_prices(ticker, end_date, days=30):
     """
-    Get stock price history from Yahoo Finance with fallback to mock data.
-    Tries multiple methods to fetch real data before falling back to mock.
+    Get stock price history from Yahoo Finance.
+    ROBUST FIX: No mock data fallback - only real data is used.
     """
     try:
         end_dt = datetime.strptime(end_date, '%Y-%m-%d')
@@ -250,25 +225,10 @@ def get_stock_prices(ticker, end_date, days=30):
         except Exception as e:
             print(f"  ✗ pandas_datareader failed: {e}")
 
-        # Method 3: Fallback to mock data
-        print(f"  ⚠ All real data methods failed, using MOCK data for demonstration")
-
-        base_prices = {
-            'NVDA': 140, 'AAPL': 180, 'MSFT': 380, 'GOOGL': 140, 'META': 500,
-            'TSLA': 250, 'AMZN': 170, 'AMD': 140, 'NFLX': 600, 'BABA': 90,
-            'CRWD': 300, 'ADM': 55, 'SPY': 450
-        }
-        base_price = base_prices.get(ticker, 150)
-
-        hist = generate_mock_stock_data(ticker, start_dt, end_dt, base_price)
-
-        if hist.empty:
-            print(f"  ✗ WARNING: Mock data generation also failed for {ticker}")
-            return pd.DataFrame()
-
-        print(f"  Generated {len(hist)} mock price records")
-        print(f"    Price range: ${hist['Close'].min():.2f} - ${hist['Close'].max():.2f}")
-        return hist
+        # ROBUST FIX: No mock data fallback - return empty DataFrame if no real data available
+        print(f"  ✗ WARNING: All real data methods failed for {ticker}")
+        print(f"    Returning empty DataFrame - chart will show 'No data available'")
+        return pd.DataFrame()
 
     except Exception as e:
         print(f"ERROR in get_stock_prices for {ticker}: {e}")
@@ -453,8 +413,8 @@ def sentiment_chart(ticker, date):
         summary = {
             'avg_sentiment': round(df['sentiment_mean'].mean(), 3),
             'total_mentions': int(df['mentions'].sum()),
-            'window_sentiment': round(df['window_sentiment'].mean(), 3),
-            'z_score': round(df['z_score'].mean(), 3) if 'z_score' in df.columns else 0.0
+            'window_sentiment': round(df['window_sentiment'].mean(), 3) if not df['window_sentiment'].isna().all() else 0.0,
+            'sentiment_volatility': round(df['sentiment_mean'].std(), 3) if len(df) > 1 else 0.0
         }
 
         return jsonify({

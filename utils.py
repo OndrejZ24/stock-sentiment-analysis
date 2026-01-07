@@ -866,14 +866,14 @@ def fetch_historical_prices(ticker, start_date, end_date) -> DataFrameType:
 def check_market_moved_before_date(df: DataFrameType, target_date: str) -> dict:
     """
     Determines whether a stock has already made a significant move before a given sentiment-spike date.
-    
+
     Parameters:
     -----------
     df : pd.DataFrame
         DataFrame with columns: Open, High, Low, Close, Volume (indexed by date)
     target_date : str
         The sentiment-spike date to check (format: 'YYYY-MM-DD')
-    
+
     Returns:
     --------
     dict : Dictionary containing all intermediate signals and the final market_moved_flag,
@@ -881,76 +881,76 @@ def check_market_moved_before_date(df: DataFrameType, target_date: str) -> dict:
     """
     if not PANDAS_AVAILABLE or not NUMPY_AVAILABLE:
         raise ImportError("pandas and numpy are required for this function")
-    
+
     try:
         # Handle multi-level columns if present
         if isinstance(df.columns, pd.MultiIndex):
             df = df.copy()
             df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-        
+
         # Make a copy to avoid modifying original
         df = df.copy()
-        
+
         # Ensure df has a datetime index
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
-        
+
         # Normalize the index to remove timezone info for easier comparison
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
-        
+
         # Also normalize to date only (remove time component)
         df.index = df.index.normalize()
-        
+
         # Convert target_date to datetime (timezone-naive)
         target_dt = pd.to_datetime(target_date).normalize()
-        
+
         # Check if target_date exists in the dataframe
         if target_dt not in df.index:
             return None
-        
+
         # Get data up to and including target_date
         df_until_target = df[df.index <= target_dt].copy()
-        
+
         # Check minimum required history (need at least 20 days for rolling stats)
         if len(df_until_target) < 20:
             return None
-        
+
         # 1. Calculate daily returns
         df_until_target['returns'] = df_until_target['Close'].pct_change()
-        
+
         # 2. Compute 3-day percentage price change (t-3 to t) with z-score normalization
         if len(df_until_target) < 3:
             return None
         close_t = df_until_target.loc[target_dt, 'Close']
         close_t_minus_3 = df_until_target['Close'].iloc[-4] if len(df_until_target) >= 4 else np.nan
         pct_change_3d = ((close_t - close_t_minus_3) / close_t_minus_3) * 100 if not pd.isna(close_t_minus_3) else np.nan
-        
+
         # Compute rolling 3-day % change series for z-score (normalized against stock's own volatility)
         df_until_target['pct_change_3d_series'] = df_until_target['Close'].pct_change(periods=3) * 100
         pct_3d_rolling_mean = df_until_target['pct_change_3d_series'].rolling(window=20, min_periods=20).mean()
         pct_3d_rolling_std = df_until_target['pct_change_3d_series'].rolling(window=20, min_periods=20).std()
         df_until_target['pct_3d_z'] = (df_until_target['pct_change_3d_series'] - pct_3d_rolling_mean) / pct_3d_rolling_std
         pct_3d_z = df_until_target.loc[target_dt, 'pct_3d_z']
-        
+
         # 3. Compute abnormal return z-score (20-day rolling)
         rolling_mean = df_until_target['returns'].rolling(window=20, min_periods=20).mean()
         rolling_std = df_until_target['returns'].rolling(window=20, min_periods=20).std()
         df_until_target['ret_z'] = (df_until_target['returns'] - rolling_mean) / rolling_std
         ret_z = df_until_target.loc[target_dt, 'ret_z']
-        
+
         # 4. Compute volatility expansion (3-day vs 20-day std) as a rolling series
         df_until_target['std_3d'] = df_until_target['returns'].rolling(window=3).std()
         df_until_target['std_20d'] = df_until_target['returns'].rolling(window=20).std()
         df_until_target['vol_expansion'] = df_until_target['std_3d'] / df_until_target['std_20d']
         vol_expansion = df_until_target.loc[target_dt, 'vol_expansion']
-        
+
         # 5. Compute abnormal volume z-score (20-day rolling)
         vol_rolling_mean = df_until_target['Volume'].rolling(window=20, min_periods=20).mean()
         vol_rolling_std = df_until_target['Volume'].rolling(window=20, min_periods=20).std()
         df_until_target['vol_z'] = (df_until_target['Volume'] - vol_rolling_mean) / vol_rolling_std
         vol_z = df_until_target.loc[target_dt, 'vol_z']
-        
+
         # 6. Compute ATR-14 using True Range
         df_until_target['prev_close'] = df_until_target['Close'].shift(1)
         hl = df_until_target['High'] - df_until_target['Low']
@@ -959,19 +959,19 @@ def check_market_moved_before_date(df: DataFrameType, target_date: str) -> dict:
         df_until_target['tr'] = pd.concat([hl, hc, lc], axis=1).max(axis=1)
         df_until_target['atr_14'] = df_until_target['tr'].rolling(window=14, min_periods=14).mean()
         atr_14 = df_until_target.loc[target_dt, 'atr_14']
-        
+
         # 7. Compute ATR-based move (3-day absolute price move / ATR-14) as a rolling series
         df_until_target['abs_3d_move'] = df_until_target['Close'].diff(periods=3).abs()
         df_until_target['atr_move'] = df_until_target['abs_3d_move'] / df_until_target['atr_14']
         atr_move = df_until_target.loc[target_dt, 'atr_move']
-        
+
         # 8. Combine signals into market_moved_flag
         # Check last 5 trading days (same as visualization logic)
         recent_days = 5
         df_recent = df_until_target.tail(recent_days)
-        
+
         market_moved_flag = False
-        
+
         # Check if ANY of the last 5 days triggered any threshold
         # OPTIMIZED FOR SHARPE RATIO (grid search results)
         # Z_THRESHOLD = 2.0, VOL_EXPANSION = 1.75, ATR_MOVE = 2.0
@@ -985,7 +985,7 @@ def check_market_moved_before_date(df: DataFrameType, target_date: str) -> dict:
             market_moved_flag = True
         if (df_recent['atr_move'] >= 2.0).any():
             market_moved_flag = True
-        
+
         # 9. Return all intermediate values and final flag
         return {
             'target_date': target_date,
@@ -998,7 +998,7 @@ def check_market_moved_before_date(df: DataFrameType, target_date: str) -> dict:
             'atr_move': round(float(atr_move), 2) if not pd.isna(atr_move) else None,
             'market_moved_flag': market_moved_flag
         }
-        
+
     except Exception as e:
         print(f"Error in check_market_moved_before_date: {str(e)}")
         return None
@@ -1012,11 +1012,11 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
     """
     if not PANDAS_AVAILABLE or not NUMPY_AVAILABLE:
         raise ImportError("pandas and numpy are required for this function")
-    
+
     # Import matplotlib here to avoid loading it if not needed
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
-    
+
     # Prepare data
     df_plot = df.copy()
     if isinstance(df_plot.columns, pd.MultiIndex):
@@ -1027,13 +1027,13 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
         df_plot.index = df_plot.index.tz_localize(None)
     df_plot.index = df_plot.index.normalize()
     target_dt = pd.to_datetime(target_date).normalize()
-    
+
     # Get window
     target_idx = df_plot.index.get_loc(target_dt)
     start_idx = max(0, target_idx - window_days + 1)
     df_window = df_plot.iloc[start_idx:target_idx + 1].copy()
     num_days = len(df_window)
-    
+
     # Calculate metrics
     df_window['returns'] = df_window['Close'].pct_change()
     df_window['rolling_mean'] = df_window['returns'].rolling(window=20, min_periods=20).mean()
@@ -1058,12 +1058,12 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
     df_window['std_3d'] = df_window['returns'].rolling(window=3).std()
     df_window['std_20d'] = df_window['returns'].rolling(window=20).std()
     df_window['vol_expansion'] = df_window['std_3d'] / df_window['std_20d']
-    
+
     # Recent window for highlighting (last 5 days)
     recent_days = 5
     df_recent = df_window.tail(recent_days)
     recent_dates = set(df_recent.index)
-    
+
     triggered_recent = {
         'pct_3d_z': df_recent[df_recent['pct_3d_z'].abs() >= 2]['pct_3d_z'],
         'ret_z': df_recent[df_recent['ret_z'].abs() >= 2]['ret_z'],
@@ -1072,11 +1072,11 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
         'atr_move': df_recent[df_recent['atr_move'] >= 2.0]['atr_move']
     }
     any_triggered = any(len(v) > 0 for v in triggered_recent.values())
-    
+
     # COMPACT LAYOUT: 2x3 grid (PowerPoint friendly)
     fig = plt.figure(figsize=(12, 8))
     gs = fig.add_gridspec(2, 3, hspace=0.35, wspace=0.3)
-    
+
     # Colors (original scheme)
     c_price = '#2C3E50'
     c_pct = '#E67E22'
@@ -1084,7 +1084,7 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
     c_normal = '#4ECDC4'
     c_volume = '#9B59B6'
     c_triggered = '#FF6B6B'
-    
+
     def format_ax(ax, title):
         ax.set_title(title, fontsize=9, fontweight='bold')
         ax.tick_params(labelsize=7)
@@ -1094,7 +1094,7 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
         # Shade recent period
         if len(df_recent) > 0:
             ax.axvspan(df_recent.index[0], df_recent.index[-1], alpha=0.15, color='#FFD700', zorder=0)
-    
+
     # 1. PRICE CHART with dual y-axis (top-left, spans 2 columns)
     ax1 = fig.add_subplot(gs[0, :2])
     ax1.plot(df_window.index, df_window['Close'], color=c_price, linewidth=1.5, label=f'{ticker} Price')
@@ -1102,7 +1102,7 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
     ax1.set_ylabel('Price ($)', fontsize=8, color=c_price)
     ax1.tick_params(axis='y', labelcolor=c_price)
     format_ax(ax1, f'{ticker} Price & 3d% Z-Score')
-    
+
     # Secondary y-axis for 3-day % change Z-score (normalized)
     ax1b = ax1.twinx()
     ax1b.plot(df_window.index, df_window['pct_3d_z'], color=c_pct, linewidth=1.2, alpha=0.8, label='3d% Z-Score')
@@ -1118,7 +1118,7 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax1b.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=7, framealpha=0.9)
-    
+
     # 2. VOLATILITY EXPANSION (top-right)
     ax2 = fig.add_subplot(gs[0, 2])
     ax2.plot(df_window.index, df_window['vol_expansion'], color=c_price, linewidth=1.2, marker='o', markersize=2, label='Vol Expansion')
@@ -1127,16 +1127,16 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
     # Highlight ONLY recent triggers
     recent_vol_exp_triggered = df_recent[df_recent['vol_expansion'] >= 1.75]
     if len(recent_vol_exp_triggered) > 0:
-        ax2.scatter(recent_vol_exp_triggered.index, recent_vol_exp_triggered['vol_expansion'], 
+        ax2.scatter(recent_vol_exp_triggered.index, recent_vol_exp_triggered['vol_expansion'],
                    color=c_triggered, s=50, zorder=5, edgecolors='white', linewidths=0.5, label='Triggered')
     ax2.set_ylabel('Ratio', fontsize=8)
     ax2.set_ylim(bottom=0)
     ax2.legend(loc='upper left', fontsize=6, framealpha=0.9)
     format_ax(ax2, 'Volatility Expansion (≥1.75)')
-    
+
     # 3. RETURN Z-SCORE (bottom-left)
     ax3 = fig.add_subplot(gs[1, 0])
-    colors_rz = [c_triggered if (idx in recent_dates and pd.notna(v) and abs(v) >= 2) 
+    colors_rz = [c_triggered if (idx in recent_dates and pd.notna(v) and abs(v) >= 2)
                  else c_normal for idx, v in zip(df_window.index, df_window['ret_z'])]
     ax3.bar(df_window.index, df_window['ret_z'], width=0.8, color=colors_rz, alpha=0.7, label='Return Z')
     ax3.axhline(y=2, color=c_thresh, linestyle='--', linewidth=1, alpha=0.7, label='Threshold (±2)')
@@ -1145,10 +1145,10 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
     ax3.set_ylabel('Z-Score', fontsize=8)
     ax3.legend(loc='upper left', fontsize=6, framealpha=0.9)
     format_ax(ax3, 'Return Z-Score (±2)')
-    
+
     # 4. VOLUME Z-SCORE (bottom-center)
     ax4 = fig.add_subplot(gs[1, 1])
-    colors_vz = [c_triggered if (idx in recent_dates and pd.notna(v) and abs(v) >= 2) 
+    colors_vz = [c_triggered if (idx in recent_dates and pd.notna(v) and abs(v) >= 2)
                  else c_volume for idx, v in zip(df_window.index, df_window['vol_z'])]
     ax4.bar(df_window.index, df_window['vol_z'], width=0.8, color=colors_vz, alpha=0.7, label='Volume Z')
     ax4.axhline(y=2, color=c_thresh, linestyle='--', linewidth=1, alpha=0.7, label='Threshold (±2)')
@@ -1157,7 +1157,7 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
     ax4.set_ylabel('Z-Score', fontsize=8)
     ax4.legend(loc='upper left', fontsize=6, framealpha=0.9)
     format_ax(ax4, 'Volume Z-Score (±2)')
-    
+
     # 5. ATR MOVE (bottom-right)
     ax5 = fig.add_subplot(gs[1, 2])
     ax5.plot(df_window.index, df_window['atr_move'], color=c_price, linewidth=1.2, marker='o', markersize=2, label='ATR Move')
@@ -1165,32 +1165,32 @@ def visualize_market_move_analysis(df: DataFrameType, target_date: str, ticker: 
     # Highlight ONLY recent triggers
     recent_atr_triggered = df_recent[df_recent['atr_move'] >= 2.0]
     if len(recent_atr_triggered) > 0:
-        ax5.scatter(recent_atr_triggered.index, recent_atr_triggered['atr_move'], 
+        ax5.scatter(recent_atr_triggered.index, recent_atr_triggered['atr_move'],
                    color=c_triggered, s=50, zorder=5, edgecolors='white', linewidths=0.5, label='Triggered')
     ax5.set_ylabel('ATR Multiple', fontsize=8)
     ax5.set_ylim(bottom=0)
     ax5.legend(loc='upper left', fontsize=6, framealpha=0.9)
     format_ax(ax5, 'ATR Move (≥2.0)')
-    
+
     # SUMMARY BOX - in the title area
-    if any_triggered:      
+    if any_triggered:
         status = "Market moved"
         status_color = '#FFCCCC'
     else:
         status = "No recent move"
         status_color = '#90EE90'
-    
-    fig.suptitle(f'{ticker} Market Analysis  •  Target: {target_date}  •  {status}', 
+
+    fig.suptitle(f'{ticker} Market Analysis  •  Target: {target_date}  •  {status}',
                  fontsize=11, fontweight='bold', y=0.98,
                  bbox=dict(boxstyle='round,pad=0.3', facecolor=status_color, alpha=0.8))
-    
+
     # Legend for recent period
-    fig.text(0.99, 0.01, f'Yellow = Last {recent_days} days (trigger window)', 
+    fig.text(0.99, 0.01, f'Yellow = Last {recent_days} days (trigger window)',
              fontsize=7, ha='right', va='bottom', style='italic', color='#666')
-    
+
     plt.subplots_adjust(left=0, right=1, top=0.90, bottom=0.08, hspace=0.35, wspace=0.55)
     plt.show()
-    
+
     return check_market_moved_before_date(df, target_date)
 
 def adjust_to_trading_day(date_str):
@@ -1202,3 +1202,277 @@ def adjust_to_trading_day(date_str):
     elif dt.weekday() == 6:  # Sunday -> Friday
         dt = dt - timedelta(days=2)
     return dt.strftime('%Y-%m-%d')
+
+
+# =============================================================================
+# SENTIMENT_DAILY TABLE - CANONICAL DAILY AGGREGATION
+# =============================================================================
+
+def create_sentiment_daily_table(conn) -> bool:
+    """
+    Create the SENTIMENT_DAILY table structure in Oracle.
+    This table serves as the canonical source for daily sentiment aggregations.
+
+    Returns:
+        bool: True if table created successfully, False otherwise
+    """
+    if not ORACLE_AVAILABLE:
+        raise ImportError("oracledb not available")
+
+    try:
+        cursor = conn.cursor()
+
+        # Drop existing table if any
+        try:
+            cursor.execute("DROP TABLE SENTIMENT_DAILY")
+            logger.info("Dropped existing SENTIMENT_DAILY table")
+        except:
+            pass
+
+        # Create table with comprehensive structure
+        create_sql = """
+        CREATE TABLE SENTIMENT_DAILY (
+            TICKER VARCHAR2(20) NOT NULL,
+            SENTIMENT_DATE DATE NOT NULL,
+            SENTIMENT_MEAN NUMBER(15,6),
+            SENTIMENT_MEDIAN NUMBER(15,6),
+            SENTIMENT_STD NUMBER(15,6),
+            MENTIONS NUMBER(10,0),
+            TOTAL_UPVOTES NUMBER(15,2),
+            AVG_UPVOTES NUMBER(15,4),
+            WEIGHTED_SENTIMENT NUMBER(15,6),
+            POSITIVE_COUNT NUMBER(10,0),
+            NEUTRAL_COUNT NUMBER(10,0),
+            NEGATIVE_COUNT NUMBER(10,0),
+            CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT PK_SENTIMENT_DAILY PRIMARY KEY (TICKER, SENTIMENT_DATE)
+        )
+        """
+        cursor.execute(create_sql)
+
+        # Create index for fast lookups
+        cursor.execute("CREATE INDEX IDX_SENTIMENT_DAILY_DATE ON SENTIMENT_DAILY(SENTIMENT_DATE)")
+        cursor.execute("CREATE INDEX IDX_SENTIMENT_DAILY_TICKER ON SENTIMENT_DAILY(TICKER)")
+
+        conn.commit()
+        cursor.close()
+
+        logger.info("Created SENTIMENT_DAILY table with indexes")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to create SENTIMENT_DAILY table: {e}")
+        return False
+
+
+def populate_sentiment_daily(conn, start_date: str = None, end_date: str = None) -> int:
+    """
+    Populate SENTIMENT_DAILY table by aggregating from SENTIMENT_RESULTS.
+
+    This function aggregates raw sentiment data (many rows per ticker per day)
+    into a single row per (ticker, date) with computed statistics.
+
+    Args:
+        conn: Oracle database connection
+        start_date: Start date (YYYY-MM-DD), defaults to min date in SENTIMENT_RESULTS
+        end_date: End date (YYYY-MM-DD), defaults to max date in SENTIMENT_RESULTS
+
+    Returns:
+        int: Number of rows inserted, or -1 if failed
+    """
+    if not ORACLE_AVAILABLE or not PANDAS_AVAILABLE:
+        raise ImportError("oracledb and pandas are required")
+
+    try:
+        cursor = conn.cursor()
+
+        # Build date filter clause
+        date_filter = ""
+        params = {}
+        if start_date:
+            date_filter += " AND TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400) >= TO_DATE(:start_dt, 'YYYY-MM-DD')"
+            params['start_dt'] = start_date
+        if end_date:
+            date_filter += " AND TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400) <= TO_DATE(:end_dt, 'YYYY-MM-DD')"
+            params['end_dt'] = end_date
+
+        # Aggregation query with comprehensive metrics
+        # NOTE: CREATED_UTC is Unix seconds (e.g., 1704140129)
+        insert_sql = f"""
+        INSERT INTO SENTIMENT_DAILY (
+            TICKER, SENTIMENT_DATE, SENTIMENT_MEAN, SENTIMENT_MEDIAN, SENTIMENT_STD,
+            MENTIONS, TOTAL_UPVOTES, AVG_UPVOTES, WEIGHTED_SENTIMENT,
+            POSITIVE_COUNT, NEUTRAL_COUNT, NEGATIVE_COUNT
+        )
+        SELECT
+            TICKER,
+            TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400) as SENTIMENT_DATE,
+            AVG(FINAL_SENTIMENT_SCORE) as SENTIMENT_MEAN,
+            MEDIAN(FINAL_SENTIMENT_SCORE) as SENTIMENT_MEDIAN,
+            STDDEV(FINAL_SENTIMENT_SCORE) as SENTIMENT_STD,
+            COUNT(*) as MENTIONS,
+            SUM(NORMALIZED_UPVOTES) as TOTAL_UPVOTES,
+            AVG(NORMALIZED_UPVOTES) as AVG_UPVOTES,
+            SUM(FINAL_SENTIMENT_SCORE * NORMALIZED_UPVOTES) / NULLIF(SUM(NORMALIZED_UPVOTES), 0) as WEIGHTED_SENTIMENT,
+            SUM(CASE WHEN FINAL_SENTIMENT_LABEL = 'positive' THEN 1 ELSE 0 END) as POSITIVE_COUNT,
+            SUM(CASE WHEN FINAL_SENTIMENT_LABEL = 'neutral' THEN 1 ELSE 0 END) as NEUTRAL_COUNT,
+            SUM(CASE WHEN FINAL_SENTIMENT_LABEL = 'negative' THEN 1 ELSE 0 END) as NEGATIVE_COUNT
+        FROM SENTIMENT_RESULTS
+        WHERE 1=1 {date_filter}
+        GROUP BY
+            TICKER,
+            TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400)
+        """
+
+        cursor.execute(insert_sql, params)
+        rows_inserted = cursor.rowcount
+        conn.commit()
+        cursor.close()
+
+        logger.info(f"Populated SENTIMENT_DAILY with {rows_inserted:,} rows")
+        return rows_inserted
+
+    except Exception as e:
+        logger.error(f"Failed to populate SENTIMENT_DAILY: {e}")
+        import traceback
+        traceback.print_exc()
+        return -1
+
+
+def refresh_sentiment_daily(start_date: str = None, end_date: str = None) -> int:
+    """
+    Full refresh of SENTIMENT_DAILY table: drop, create, and populate.
+
+    Args:
+        start_date: Start date (YYYY-MM-DD), optional
+        end_date: End date (YYYY-MM-DD), optional
+
+    Returns:
+        int: Number of rows inserted, or -1 if failed
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        logger.error("Failed to connect to Oracle")
+        return -1
+
+    try:
+        # Create table structure
+        if not create_sentiment_daily_table(conn):
+            return -1
+
+        # Populate with aggregated data
+        rows = populate_sentiment_daily(conn, start_date, end_date)
+
+        return rows
+
+    finally:
+        conn.close()
+
+
+def get_daily_sentiment_from_oracle(conn, ticker: str = None,
+                                     start_date: str = None,
+                                     end_date: str = None) -> DataFrameType:
+    """
+    Load daily sentiment data from SENTIMENT_DAILY table.
+
+    This is the canonical way to get aggregated daily sentiment data.
+    Falls back to direct aggregation if SENTIMENT_DAILY doesn't exist.
+
+    Args:
+        conn: Oracle database connection
+        ticker: Filter by specific ticker (optional)
+        start_date: Start date filter (YYYY-MM-DD)
+        end_date: End date filter (YYYY-MM-DD)
+
+    Returns:
+        DataFrame with daily sentiment data
+    """
+    if not PANDAS_AVAILABLE:
+        raise ImportError("pandas not available")
+
+    # Build query with filters
+    where_clauses = []
+    params = {}
+
+    if ticker:
+        where_clauses.append("TICKER = :ticker")
+        params['ticker'] = ticker
+    if start_date:
+        where_clauses.append("SENTIMENT_DATE >= TO_DATE(:start_dt, 'YYYY-MM-DD')")
+        params['start_dt'] = start_date
+    if end_date:
+        where_clauses.append("SENTIMENT_DATE <= TO_DATE(:end_dt, 'YYYY-MM-DD')")
+        params['end_dt'] = end_date
+
+    where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
+
+    query = f"""
+    SELECT
+        TICKER, SENTIMENT_DATE, SENTIMENT_MEAN, SENTIMENT_MEDIAN, SENTIMENT_STD,
+        MENTIONS, TOTAL_UPVOTES, AVG_UPVOTES, WEIGHTED_SENTIMENT,
+        POSITIVE_COUNT, NEUTRAL_COUNT, NEGATIVE_COUNT
+    FROM SENTIMENT_DAILY
+    WHERE {where_clause}
+    ORDER BY TICKER, SENTIMENT_DATE
+    """
+
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+        logger.info(f"Loaded {len(df):,} rows from SENTIMENT_DAILY")
+        return df
+    except Exception as e:
+        # Table might not exist - fall back to direct aggregation
+        logger.warning(f"SENTIMENT_DAILY query failed: {e}")
+        logger.info("Falling back to direct aggregation from SENTIMENT_RESULTS")
+        return _aggregate_sentiment_directly(conn, ticker, start_date, end_date)
+
+
+def _aggregate_sentiment_directly(conn, ticker: str = None,
+                                   start_date: str = None,
+                                   end_date: str = None) -> DataFrameType:
+    """
+    Fallback: aggregate sentiment directly from SENTIMENT_RESULTS if SENTIMENT_DAILY doesn't exist.
+    """
+    if not PANDAS_AVAILABLE:
+        raise ImportError("pandas not available")
+
+    where_clauses = []
+    params = {}
+
+    if ticker:
+        where_clauses.append("TICKER = :ticker")
+        params['ticker'] = ticker
+    if start_date:
+        where_clauses.append("TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400) >= TO_DATE(:start_dt, 'YYYY-MM-DD')")
+        params['start_dt'] = start_date
+    if end_date:
+        where_clauses.append("TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400) <= TO_DATE(:end_dt, 'YYYY-MM-DD')")
+        params['end_dt'] = end_date
+
+    where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
+
+    query = f"""
+    SELECT
+        TICKER,
+        TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400) as SENTIMENT_DATE,
+        AVG(FINAL_SENTIMENT_SCORE) as SENTIMENT_MEAN,
+        MEDIAN(FINAL_SENTIMENT_SCORE) as SENTIMENT_MEDIAN,
+        STDDEV(FINAL_SENTIMENT_SCORE) as SENTIMENT_STD,
+        COUNT(*) as MENTIONS,
+        SUM(NORMALIZED_UPVOTES) as TOTAL_UPVOTES,
+        AVG(NORMALIZED_UPVOTES) as AVG_UPVOTES,
+        SUM(FINAL_SENTIMENT_SCORE * NORMALIZED_UPVOTES) / NULLIF(SUM(NORMALIZED_UPVOTES), 0) as WEIGHTED_SENTIMENT,
+        SUM(CASE WHEN FINAL_SENTIMENT_LABEL = 'positive' THEN 1 ELSE 0 END) as POSITIVE_COUNT,
+        SUM(CASE WHEN FINAL_SENTIMENT_LABEL = 'neutral' THEN 1 ELSE 0 END) as NEUTRAL_COUNT,
+        SUM(CASE WHEN FINAL_SENTIMENT_LABEL = 'negative' THEN 1 ELSE 0 END) as NEGATIVE_COUNT
+    FROM SENTIMENT_RESULTS
+    WHERE {where_clause}
+    GROUP BY
+        TICKER,
+        TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400)
+    ORDER BY TICKER, SENTIMENT_DATE
+    """
+
+    df = pd.read_sql_query(query, conn, params=params)
+    logger.info(f"Aggregated {len(df):,} rows directly from SENTIMENT_RESULTS")
+    return df
