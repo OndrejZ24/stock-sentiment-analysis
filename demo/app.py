@@ -42,14 +42,19 @@ def get_available_dates():
         return []
 
 def get_signals_for_date(selected_date):
-    """Query FILTERED_SIGNALS table for a specific date - only TICKER, SIGNAL_DATE, SIGNAL_TYPE."""
+    """Query FILTERED_SIGNALS table for a specific date - with ALL signal metrics."""
     try:
         conn = get_oracle_connection()
         cursor = conn.cursor()
 
-        # Query only the 3 essential columns
+        # Query ALL signal metrics for transparency
         query = """
-            SELECT TICKER, SIGNAL_DATE, SIGNAL_TYPE
+            SELECT
+                TICKER, SIGNAL_DATE, SIGNAL_TYPE,
+                WINDOW_SENTIMENT, WINDOW_MENTIONS,
+                BASELINE_MEAN, BASELINE_STD,
+                Z_SCORE, SIGNAL_SCORE,
+                SENTIMENT_MEAN, TOTAL_UPVOTES
             FROM FILTERED_SIGNALS
             WHERE TRUNC(SIGNAL_DATE) = TO_DATE(:date_param, 'YYYY-MM-DD')
             ORDER BY TICKER
@@ -71,7 +76,15 @@ def get_signals_for_date(selected_date):
             signal = {
                 'ticker': row[0],
                 'signal_date': signal_date,
-                'signal_type': row[2]  # This is BUY or SELL
+                'signal_type': row[2],  # BUY or SELL
+                'window_sentiment': float(row[3]) if row[3] is not None else None,
+                'window_mentions': float(row[4]) if row[4] is not None else None,
+                'baseline_mean': float(row[5]) if row[5] is not None else None,
+                'baseline_std': float(row[6]) if row[6] is not None else None,
+                'z_score': float(row[7]) if row[7] is not None else None,
+                'signal_score': float(row[8]) if row[8] is not None else None,
+                'sentiment_mean': float(row[9]) if row[9] is not None else None,
+                'total_upvotes': float(row[10]) if row[10] is not None else None
             }
             signals.append(signal)
 
@@ -87,7 +100,7 @@ def get_signals_for_date(selected_date):
 def get_sentiment_history(ticker, end_date, days=30):
     """
     Get daily aggregated sentiment history from SENTIMENT_RESULTS table.
-    Aggregates FINAL_SENTIMENT_SCORE by day for the specified ticker.
+    Also loads actual signal metrics from FILTERED_SIGNALS for transparency.
     """
     try:
         conn = get_oracle_connection()
@@ -97,49 +110,93 @@ def get_sentiment_history(ticker, end_date, days=30):
         end_dt = datetime.strptime(end_date, '%Y-%m-%d')
         start_dt = end_dt - timedelta(days=days)
 
-        # Convert to Unix timestamps (seconds)
-        start_timestamp = int(start_dt.timestamp())
-        end_timestamp = int(end_dt.timestamp()) + 86400  # Add one day
+        # Use date strings for comparison (fixes timezone bug)
+        start_date_str = start_dt.strftime('%Y-%m-%d')
+        end_date_str = end_dt.strftime('%Y-%m-%d')
 
+        # Query sentiment data with proper date comparison
         query = """
             SELECT
                 TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400) as sentiment_date,
                 AVG(FINAL_SENTIMENT_SCORE) as avg_sentiment,
                 COUNT(*) as mention_count,
+                SUM(NORMALIZED_UPVOTES) as total_upvotes,
                 STDDEV(FINAL_SENTIMENT_SCORE) as sentiment_stddev
             FROM SENTIMENT_RESULTS
             WHERE TICKER = :ticker
-            AND CREATED_UTC BETWEEN :start_ts AND :end_ts
+            AND TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400)
+                BETWEEN TO_DATE(:start_date, 'YYYY-MM-DD')
+                AND TO_DATE(:end_date, 'YYYY-MM-DD')
             GROUP BY TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD') + CREATED_UTC / 86400)
             ORDER BY sentiment_date
         """
 
         cursor.execute(query, {
             'ticker': ticker,
-            'start_ts': start_timestamp,
-            'end_ts': end_timestamp
+            'start_date': start_date_str,
+            'end_date': end_date_str
         })
 
         rows = cursor.fetchall()
 
-        cursor.close()
-        conn.close()
-
         # Convert to dataframe
         if rows:
-            df = pd.DataFrame(rows, columns=['date', 'sentiment_mean', 'mentions', 'sentiment_stddev'])
+            df = pd.DataFrame(rows, columns=['date', 'sentiment_mean', 'mentions', 'total_upvotes', 'sentiment_stddev'])
             df['date'] = pd.to_datetime(df['date'])
 
-            # Calculate rolling window sentiment (7-day moving average)
-            df['window_sentiment'] = df['sentiment_mean'].rolling(window=min(7, len(df)), min_periods=1).mean()
+            # Compute 3-day mention-weighted window sentiment for ALL days (matches signal generation logic)
+            # This creates the blue line that spans the entire chart
+            df['weighted_sentiment'] = df['sentiment_mean'] * df['mentions']
 
-            print(f"Fetched {len(df)} days of sentiment data for {ticker} from SENTIMENT_RESULTS")
+            # 3-day rolling window with mention-based weighting
+            roll_mentions = df['mentions'].rolling(window=3, min_periods=1).sum()
+            roll_sent_sum = df['weighted_sentiment'].rolling(window=3, min_periods=1).sum()
+            df['window_sentiment'] = roll_sent_sum / roll_mentions.replace(0, np.nan)
+
+            # Load signal markers and baseline metrics from FILTERED_SIGNALS
+            signal_query = """
+                SELECT
+                    SIGNAL_DATE, BASELINE_MEAN, BASELINE_STD, Z_SCORE, SIGNAL_TYPE
+                FROM FILTERED_SIGNALS
+                WHERE TICKER = :ticker
+                AND SIGNAL_DATE BETWEEN TO_DATE(:start_date, 'YYYY-MM-DD')
+                    AND TO_DATE(:end_date, 'YYYY-MM-DD')
+            """
+
+            cursor.execute(signal_query, {
+                'ticker': ticker,
+                'start_date': start_date_str,
+                'end_date': end_date_str
+            })
+
+            signal_rows = cursor.fetchall()
+
+            if signal_rows:
+                signal_df = pd.DataFrame(signal_rows,
+                    columns=['date', 'baseline_mean', 'baseline_std', 'z_score', 'signal_type'])
+                signal_df['date'] = pd.to_datetime(signal_df['date'])
+
+                # Merge signal metrics (baseline and z_score for markers only)
+                df = df.merge(signal_df, on='date', how='left')
+            else:
+                # No signals for this ticker in this period
+                df['baseline_mean'] = None
+                df['baseline_std'] = None
+                df['z_score'] = None
+                df['signal_type'] = None
+
+            cursor.close()
+            conn.close()
+
+            print(f"Fetched {len(df)} days of sentiment data for {ticker}")
             print(f"  Date range: {df['date'].min()} to {df['date'].max()}")
             print(f"  Total mentions: {df['mentions'].sum()}")
             return df
         else:
-            print(f"No sentiment data found in SENTIMENT_RESULTS for {ticker} between {start_dt.strftime('%Y-%m-%d')} and {end_date}")
-            return pd.DataFrame(columns=['date', 'sentiment_mean', 'mentions', 'window_sentiment'])
+            cursor.close()
+            conn.close()
+            print(f"No sentiment data found for {ticker} between {start_date_str} and {end_date_str}")
+            return pd.DataFrame(columns=['date', 'sentiment_mean', 'mentions', 'total_upvotes', 'window_sentiment'])
 
     except Exception as e:
         print(f"Error getting sentiment history for {ticker}: {e}")
@@ -240,8 +297,9 @@ def get_stock_prices(ticker, end_date, days=30):
 
 def create_sentiment_chart(ticker, end_date):
     """
-    Create sentiment chart with mentions bars and sentiment lines (dual y-axis).
-    Matches the original design.
+    Create clean two-panel sentiment chart with 3-day window as primary focus.
+    Top: Sentiment (3d window dominant, with faded daily points, baseline, threshold bands)
+    Bottom: Reddit mentions volume
     """
     import plotly.graph_objs as go
     from plotly.subplots import make_subplots
@@ -255,88 +313,205 @@ def create_sentiment_chart(ticker, end_date):
     # Sort by date
     df = df.sort_values('date')
 
-    # Create figure with secondary y-axis
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    # Compute rolling baseline (30-day) for the entire period
+    df['baseline_mean_computed'] = df['window_sentiment'].rolling(window=30, min_periods=15).mean()
+    df['baseline_std_computed'] = df['window_sentiment'].rolling(window=30, min_periods=15).std()
 
-    # 1. Reddit Mentions bars (background, on secondary y-axis)
-    fig.add_trace(
-        go.Bar(
-            x=df['date'],
-            y=df['mentions'],
-            name='Reddit Mentions',
-            marker=dict(color='rgba(255, 167, 38, 0.5)'),
-            hovertemplate='<b>%{x|%b %d}</b><br>Mentions: %{y}<extra></extra>',
-            yaxis='y2'
-        ),
-        secondary_y=True
+    # Create two-panel subplot (70% sentiment, 30% mentions)
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.70, 0.30],
+        vertical_spacing=0.08,
+        subplot_titles=(f'{ticker} - Sentiment Analysis', 'Reddit Discussion Volume'),
+        shared_xaxes=True
     )
 
-    # 2. Sentiment Mean line (solid blue)
+    # =============================================================================
+    # TOP PANEL: SENTIMENT
+    # =============================================================================
+
+    # 1. Threshold bands (subtle background - show signal zones)
+    threshold_days = df[(df['baseline_mean_computed'].notna()) & (df['baseline_std_computed'].notna())].copy()
+    if not threshold_days.empty:
+        # Calculate dynamic threshold
+        threshold_days['mention_factor'] = threshold_days['mentions'].rolling(window=3, min_periods=1).sum()
+        threshold_days['z_threshold'] = 2.0 / (1 + 0.2 * np.log1p(threshold_days['mention_factor'].clip(lower=1.0)))
+        threshold_days['upper_band'] = threshold_days['baseline_mean_computed'] + (threshold_days['z_threshold'] * threshold_days['baseline_std_computed'])
+        threshold_days['lower_band'] = threshold_days['baseline_mean_computed'] - (threshold_days['z_threshold'] * threshold_days['baseline_std_computed'])
+
+        # Upper threshold band
+        fig.add_trace(
+            go.Scatter(
+                x=threshold_days['date'],
+                y=threshold_days['upper_band'],
+                mode='lines',
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo='skip'
+            ),
+            row=1, col=1
+        )
+        # Lower threshold band
+        fig.add_trace(
+            go.Scatter(
+                x=threshold_days['date'],
+                y=threshold_days['lower_band'],
+                mode='lines',
+                fill='tonexty',
+                fillcolor='rgba(255, 200, 200, 0.12)',  # Very subtle red tint
+                line=dict(width=0),
+                name='Signal Zone',
+                hovertemplate='<b>%{x|%b %d}</b><br>Threshold Band<extra></extra>'
+            ),
+            row=1, col=1
+        )
+
+    # 2. Baseline (only if meaningful - check if it's not close to zero)
+    baseline_days = df[df['baseline_mean_computed'].notna()].copy()
+    if not baseline_days.empty:
+        baseline_mean = baseline_days['baseline_mean_computed'].mean()
+        # Only show baseline if it's significantly different from zero
+        if abs(baseline_mean) > 0.05:
+            fig.add_trace(
+                go.Scatter(
+                    x=baseline_days['date'],
+                    y=baseline_days['baseline_mean_computed'],
+                    mode='lines',
+                    name='30d Baseline',
+                    line=dict(color='rgba(150, 150, 150, 0.4)', width=1, dash='dash'),
+                    hovertemplate='<b>%{x|%b %d}</b><br>Baseline: %{y:.3f}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+
+    # 3. Daily sentiment line (matches stock price "Close Price" style)
     fig.add_trace(
         go.Scatter(
             x=df['date'],
             y=df['sentiment_mean'],
             mode='lines',
-            name='Sentiment Mean',
-            line=dict(color='#2196F3', width=2),
-            hovertemplate='<b>%{x|%b %d}</b><br>Sentiment: %{y:.3f}<extra></extra>'
+            name='Daily Sentiment',
+            line=dict(color='#2196F3', width=2),  # Blue, solid - matches Close Price
+            hovertemplate='<b>%{x|%b %d}</b><br>Daily: %{y:.3f}<extra></extra>'
         ),
-        secondary_y=False
+        row=1, col=1
     )
 
-    # 3. Window Sentiment line (dotted, where available)
-    signal_days = df[df['window_sentiment'].notna()].copy()
-    if not signal_days.empty:
+    # 4. 3-Day Window Sentiment (matches stock price "3-Day Avg" style)
+    window_days = df[df['window_sentiment'].notna()].copy()
+    if not window_days.empty:
         fig.add_trace(
             go.Scatter(
-                x=signal_days['date'],
-                y=signal_days['window_sentiment'],
+                x=window_days['date'],
+                y=window_days['window_sentiment'],
                 mode='lines',
-                name='Window Sentiment',
-                line=dict(color='#90CAF9', width=2, dash='dot'),
-                hovertemplate='<b>%{x|%b %d}</b><br>Window: %{y:.3f}<extra></extra>'
+                name='3-Day Window',
+                line=dict(color='#FF6B6B', width=1.5, dash='dot'),  # Coral/red, dotted - matches 3-Day Avg
+                hovertemplate='<b>%{x|%b %d}</b><br>3d Window: %{y:.3f}<extra></extra>'
             ),
-            secondary_y=False
+            row=1, col=1
         )
 
-    # Add zero line
-    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5, secondary_y=False)
+    # 5. Signal markers (BUY/SELL triangles on the 3-day line)
+    buy_days = df[(df['z_score'].notna()) & (df['signal_type'] == 'BUY')].copy()
+    sell_days = df[(df['z_score'].notna()) & (df['signal_type'] == 'SELL')].copy()
 
-    # Update layout
-    fig.update_layout(
-        title=f'{ticker} - Sentiment Analysis (30 Days)',
-        height=350,
-        hovermode='x unified',
-        plot_bgcolor='white',
-        legend=dict(
-            orientation='h',
-            yanchor='top',
-            y=1.15,
-            xanchor='left',
-            x=0
+    if not buy_days.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=buy_days['date'],
+                y=buy_days['window_sentiment'],
+                mode='markers',
+                name='BUY',
+                marker=dict(size=16, color='#28a745', symbol='triangle-up',
+                           line=dict(width=2, color='white')),
+                text=buy_days['z_score'],
+                hovertemplate='<b>%{x|%b %d}</b><br>BUY<br>Sentiment: %{y:.3f}<br>Z-Score: %{text:.2f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+
+    if not sell_days.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=sell_days['date'],
+                y=sell_days['window_sentiment'],
+                mode='markers',
+                name='SELL',
+                marker=dict(size=16, color='#dc3545', symbol='triangle-down',
+                           line=dict(width=2, color='white')),
+                text=sell_days['z_score'],
+                hovertemplate='<b>%{x|%b %d}</b><br>SELL<br>Sentiment: %{y:.3f}<br>Z-Score: %{text:.2f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+
+    # Zero reference line
+    fig.add_hline(y=0, line_dash="dot", line_color="rgba(100, 100, 100, 0.3)", line_width=1, row=1, col=1)
+
+    # =============================================================================
+    # BOTTOM PANEL: REDDIT MENTIONS
+    # =============================================================================
+
+    fig.add_trace(
+        go.Bar(
+            x=df['date'],
+            y=df['mentions'],
+            name='Mentions',
+            marker=dict(color='rgba(100, 150, 200, 0.6)'),
+            hovertemplate='<b>%{x|%b %d}</b><br>Mentions: %{y}<extra></extra>'
         ),
-        margin=dict(t=60, b=30, l=60, r=60)
+        row=2, col=1
     )
 
-    # Update x-axis
+    # =============================================================================
+    # LAYOUT & STYLING
+    # =============================================================================
+
+    fig.update_layout(
+        height=550,  # Taller for two panels
+        hovermode='x unified',
+        plot_bgcolor='white',
+        showlegend=True,
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='left',
+            x=0,
+            bgcolor='rgba(255, 255, 255, 0.9)'
+        ),
+        margin=dict(t=80, b=40, l=60, r=40)
+    )
+
+    # Update x-axes
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor='rgba(220, 220, 220, 0.4)',
+        row=1, col=1
+    )
     fig.update_xaxes(
         title_text='Date',
         showgrid=True,
-        gridcolor='rgba(200,200,200,0.3)'
+        gridcolor='rgba(220, 220, 220, 0.4)',
+        row=2, col=1
     )
 
     # Update y-axes
     fig.update_yaxes(
-        title_text='Sentiment Score',
+        title_text='Sentiment',
         showgrid=True,
-        gridcolor='rgba(200,200,200,0.3)',
+        gridcolor='rgba(220, 220, 220, 0.3)',
         zeroline=True,
-        secondary_y=False
+        zerolinecolor='rgba(100, 100, 100, 0.3)',
+        zerolinewidth=1,
+        row=1, col=1
     )
     fig.update_yaxes(
-        title_text='Reddit Mentions',
-        showgrid=False,
-        secondary_y=True
+        title_text='Mentions',
+        showgrid=True,
+        gridcolor='rgba(220, 220, 220, 0.3)',
+        row=2, col=1
     )
 
     return plotly.io.to_json(fig)

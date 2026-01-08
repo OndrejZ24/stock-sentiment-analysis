@@ -7,6 +7,8 @@
 
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap Icons -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
     <!-- Plotly JS -->
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 
@@ -241,12 +243,12 @@
                     <div id="modalContent" style="display: none;">
                         <!-- Sentiment Chart -->
                         <div class="chart-container">
-                            <h6 class="text-muted mb-2">📊 Sentiment Analysis</h6>
+                            <h6 class="text-muted mb-2">Sentiment Analysis</h6>
                             <div id="sentimentChart"></div>
                             <!-- Sentiment Statistics (under sentiment chart) -->
                             <div id="sentimentStats" class="mt-3" style="display: none;">
                                     <div class="row g-3">
-                                        <div class="col-12 col-md-4">
+                                        <div class="col-12 col-md-3">
                                             <div class="card border-0 bg-light h-100">
                                                 <div class="card-body text-center p-3">
                                                     <small class="text-muted d-block" title="Mean sentiment score (weighted)">Avg Sentiment</small>
@@ -254,15 +256,7 @@
                                                 </div>
                                             </div>
                                         </div>
-                                        <div class="col-12 col-md-4">
-                                            <div class="card border-0 bg-light h-100">
-                                                <div class="card-body text-center p-3">
-                                                    <small class="text-muted d-block" title="3-day rolling window sentiment">Window Sentiment</small>
-                                                    <h5 class="mb-0" id="windowSentiment">-</h5>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="col-12 col-md-4">
+                                        <div class="col-12 col-md-3">
                                             <div class="card border-0 bg-light h-100">
                                                 <div class="card-body text-center p-3">
                                                     <small class="text-muted d-block" title="Total number of mentions in period">Total Mentions</small>
@@ -270,9 +264,7 @@
                                                 </div>
                                             </div>
                                         </div>
-                                    </div>
-                                    <div class="row g-3 mt-2">
-                                        <div class="col-12 col-md-4">
+                                        <div class="col-12 col-md-3">
                                             <div class="card border-0 bg-light h-100">
                                                 <div class="card-body text-center p-3">
                                                     <small class="text-muted d-block" title="Number of days with data">Data Days</small>
@@ -280,19 +272,11 @@
                                                 </div>
                                             </div>
                                         </div>
-                                        <div class="col-12 col-md-4">
+                                        <div class="col-12 col-md-3">
                                             <div class="card border-0 bg-light h-100">
                                                 <div class="card-body text-center p-3">
                                                     <small class="text-muted d-block" title="Days with BUY or SELL signals">Signal Days</small>
                                                     <h5 class="mb-0" id="signalDays">-</h5>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="col-12 col-md-4">
-                                            <div class="card border-0 bg-light h-100">
-                                                <div class="card-body text-center p-3">
-                                                    <small class="text-muted d-block" title="Average z-score on signal days">Avg Z-Score</small>
-                                                    <h5 class="mb-0" id="avgZScore">-</h5>
                                                 </div>
                                             </div>
                                         </div>
@@ -302,10 +286,10 @@
 
                         <!-- Stock Price Chart -->
                         <div class="chart-container mt-4">
-                            <h6 class="text-muted mb-2">📈 Stock Price (Yahoo Finance)</h6>
+                            <h6 class="text-muted mb-2">Stock Price (Yahoo Finance)</h6>
                             <div id="priceChart" style="min-height: 350px; border: 1px solid #eee;"></div>
                             <div id="priceChartError" class="alert alert-warning mt-2" style="display: none;">
-                                <small>⚠️ Price data unavailable from Yahoo Finance</small>
+                                <small>Price data unavailable from Yahoo Finance</small>
                             </div>
                             <!-- Price Statistics (under price chart) -->
                             <div id="priceStats" class="mt-3" style="display: none;">
@@ -342,6 +326,11 @@
         // Load signals on page load
         document.addEventListener('DOMContentLoaded', function() {
             loadSignals();
+
+            // Add event listener to the "Show Signals" button
+            document.getElementById('loadSignals').addEventListener('click', function() {
+                loadSignals();
+            });
         });
 
         function loadSignals() {
@@ -400,6 +389,15 @@
             signals.forEach(signal => {
                 const card = document.createElement('div');
                 card.className = 'col-md-6 col-lg-4';
+
+                // Format metrics for display
+                const windowSent = signal.window_sentiment !== null && signal.window_sentiment !== undefined
+                    ? signal.window_sentiment.toFixed(3) : 'N/A';
+                const zScore = signal.z_score !== null && signal.z_score !== undefined
+                    ? signal.z_score.toFixed(2) : 'N/A';
+                const mentions = signal.window_mentions !== null && signal.window_mentions !== undefined
+                    ? Math.round(signal.window_mentions) : 'N/A';
+
                 card.innerHTML = `
                     <div class="card signal-card ${type}" onclick="showTickerDetails('${signal.ticker}', '${signal.signal_date}')">
                         <div class="card-body">
@@ -407,12 +405,30 @@
                                 <h4 class="card-title mb-0">${signal.ticker}</h4>
                                 <span class="badge badge-${type}">${signal.signal_type}</span>
                             </div>
-                            <div class="mt-3">
-                                <p class="text-muted mb-1">Date: ${signal.signal_date}</p>
-                                <p class="text-muted mb-0">Recommendation: <strong>${signal.signal_type}</strong></p>
+
+                            <!-- Signal Metrics Box -->
+                            <div class="mt-2 mb-2" style="background: #f8f9fa; padding: 10px; border-radius: 5px;">
+                                <div class="row g-2 text-center">
+                                    <div class="col-4">
+                                        <small class="text-muted d-block" style="font-size: 0.7rem;" title="3-day weighted sentiment">Window</small>
+                                        <strong style="font-size: 0.95rem; color: ${type === 'buy' ? '#28a745' : '#dc3545'};">${windowSent}</strong>
+                                    </div>
+                                    <div class="col-4">
+                                        <small class="text-muted d-block" style="font-size: 0.7rem;" title="Sentiment deviation from baseline">Z-Score</small>
+                                        <strong style="font-size: 0.95rem; color: ${type === 'buy' ? '#28a745' : '#dc3545'};">${zScore}</strong>
+                                    </div>
+                                    <div class="col-4">
+                                        <small class="text-muted d-block" style="font-size: 0.7rem;" title="Mentions in 3-day window">Mentions</small>
+                                        <strong style="font-size: 0.95rem;">${mentions}</strong>
+                                    </div>
+                                </div>
                             </div>
+
                             <div class="mt-3">
-                                <small class="text-muted">Click to view detailed charts</small>
+                                <p class="text-muted mb-1"><small>Date: ${signal.signal_date}</small></p>
+                            </div>
+                            <div class="mt-2">
+                                <small class="text-muted">Click to view detailed analysis</small>
                             </div>
                         </div>
                     </div>
@@ -454,11 +470,9 @@
                     if (sentimentData.summary) {
                         const s = sentimentData.summary;
                         document.getElementById('avgSentiment').textContent = (s.avg_sentiment != null) ? s.avg_sentiment.toFixed(3) : '-';
-                        document.getElementById('windowSentiment').textContent = (s.window_sentiment != null) ? s.window_sentiment.toFixed(3) : '-';
                         document.getElementById('totalMentions').textContent = s.total_mentions || '-';
                         document.getElementById('totalDays').textContent = s.total_days || '-';
-                        document.getElementById('signalDays').textContent = `${s.signal_days || 0} (${s.buy_signals || 0}🟢 / ${s.sell_signals || 0}🔴)`;
-                        document.getElementById('avgZScore').textContent = (s.avg_z_score != null) ? s.avg_z_score.toFixed(2) : '-';
+                        document.getElementById('signalDays').textContent = `${s.signal_days || 0} (${s.buy_signals || 0} BUY / ${s.sell_signals || 0} SELL)`;
                         document.getElementById('sentimentStats').style.display = 'block';
                     }
                 } else {
